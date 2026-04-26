@@ -15,6 +15,7 @@ Git LFS is not currently installed on the local machine used to prepare this rep
 - Confirm GEO accession numbers and add them to `README.md`.
 - Confirm final manuscript title and author order.
 - Confirm code/data licensing with the PI/lab before making the repository public.
+- Confirm that the linked MAMOTH web-app repository at https://github.com/jannisbuecking/MAMOTH is public when this repository is released.
 - Re-run `renv::snapshot()` and `sessionInfo()` from the final analysis environment if the analysis machine differs from the current local environment.
 - Add a tagged release corresponding to the accepted manuscript.
 - Consider archiving the release with Zenodo to mint a DOI.

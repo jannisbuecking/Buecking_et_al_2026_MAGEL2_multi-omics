@@ -1,0 +1,1015 @@
+---
+title: "Untitled"
+author: "Michael Eibl"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r}
+library("DESeq2")
+library("stringr")
+library("ggplot2")
+library("ggpubr")
+library("RNAseqQC")
+library("dplyr")
+library("patchwork")
+library("org.Hs.eg.db")
+library("annotate")
+library("AnnotationHub")
+library('EnhancedVolcano')
+library("gridExtra")
+library("grid")
+library("clusterProfiler")
+library("eulerr")
+library("ComplexHeatmap")
+library("openxlsx")
+library("Homo.sapiens")
+library("dplyr")
+library("limma")
+library("DEP2")
+library("patchwork")
+```
+
+Function for color scheme
+```{r}
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+```
+
+Loading the file from Azmal
+```{r}
+abundance <- read.xlsx(xlsxFile = "./Ubiquitination_IP_Azmal.xlsx")
+
+abundance <- abundance[which(!duplicated(abundance$PG.Genes)), ]
+abundance <- abundance[which(!is.na(abundance$PG.Genes)),]
+
+rownames(abundance) <- abundance$PG.Genes
+
+colnames(abundance)
+
+colnames(abundance)[c(9,11)] <- c("IP_G_HOM_rep1", "IP_G_HOM_rep3")
+colnames(abundance) <- gsub("IP_", "", colnames(abundance))
+colnames(abundance) <- gsub("Del", "DelC", colnames(abundance))
+colnames(abundance) <- gsub("DUPC", "DupC", colnames(abundance))
+colnames(abundance) <- gsub("Het", "HetDel", colnames(abundance))
+colnames(abundance) <- gsub("HOM", "HomoDel", colnames(abundance))
+colnames(abundance) <- gsub("PWS1", "PWSTI", colnames(abundance))
+colnames(abundance) <- gsub("PWS2", "PWSTII", colnames(abundance))
+colnames(abundance) <- gsub("rep", "", colnames(abundance))
+colnames(abundance) <- gsub("^M_", "MG_", colnames(abundance))
+colnames(abundance) <- gsub("^G_", "GM_", colnames(abundance))
+
+proteins_all <- rownames(abundance)
+
+
+#make columns with protein abundance numeric (default is character)
+abundance[,3:ncol(abundance)] <- sapply(abundance[,3:ncol(abundance)], as.numeric)
+
+#downstream NaNs are not allowed and should be replaced by NA
+abundance <- abundance %>% as.data.frame(.) %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+rownames(abundance) <- proteins_all
+
+#remove rows containing only NAs
+abundance <- abundance[!!rowSums(!is.na(abundance[,3:ncol(abundance)])),]
+
+#no Inf values, replaced by NA
+abundance <- do.call(data.frame,lapply(abundance, function(x) replace(x, is.infinite(x),NA)))
+```
+
+Pre-Processing
+```{r}
+# Generate a SummarizedExperiment object by parsing condition information from the column names
+experimental_design <- data.frame(row.names = colnames(abundance[,3:ncol(abundance)]),
+                                  genotype = rep(NA, ncol(abundance[,3:ncol(abundance)])),
+                                  background = rep(NA, ncol(abundance[,3:ncol(abundance)])),
+                                  replicate = rep(NA, ncol(abundance[,3:ncol(abundance)])))
+
+
+
+for (i in 1:ncol(abundance[,3:ncol(abundance)])) {
+  experimental_design[i, "genotype"] <- str_split(colnames(abundance[,3:ncol(abundance)])[i], pattern = "_")[[1]][2]
+  experimental_design[i, "background"] <- str_split(colnames(abundance[,3:ncol(abundance)])[i], pattern = "_")[[1]][1]
+  experimental_design[i, "replicate"] <- str_split(colnames(abundance[,3:ncol(abundance)])[i], pattern = "_")[[1]][3]
+}
+
+experimental_design$ID <- 1:nrow(experimental_design)
+experimental_design$name <- rownames(experimental_design)
+
+colnames(experimental_design)[c(1,5)] <- c("condition", "label")
+
+experimental_design$ID <- factor(experimental_design$ID)
+experimental_design$condition <- factor(experimental_design$condition)
+
+saveRDS(experimental_design, file = "UbiEAs_sample_info.rds")
+
+abundance_unique_8330 <- DEP2::make_unique(proteins = abundance[,c(1,2,which(experimental_design$background == "GM")+2)],
+                                     names = "PG.Genes",
+                                     ids = "PG.ProteinGroups",
+                                     delim = ",")
+
+se_8330 <- DEP2::make_se(proteins_unique = abundance_unique_8330,
+                   columns = 3:20,
+                   expdesign = experimental_design[which(experimental_design$background == "GM"),])
+
+
+abundance_unique_MGH <- DEP2::make_unique(proteins = abundance[,c(1,2,which(experimental_design$background == "MG")+2)],
+                                    names = "PG.Genes",
+                                    ids = "PG.ProteinGroups",
+                                    delim = ",")
+
+se_MGH <- DEP2::make_se(proteins_unique = abundance_unique_MGH,
+                  columns = 3:23,
+                  expdesign = experimental_design[which(experimental_design$background == "MG"),])
+```
+
+Quality control - Proteins per Sample
+```{r}
+#8330
+p1 <- plot_frequency(se_8330)
+
+#we first filter out proteins that contain too many missing values
+#Filter for proteins that are identified in all replicates of at least one condition
+data_filt_8330_Ubi <- filter_se(se_8330, thr = 0)
+
+p2 <- plot_numbers(data_filt_8330_Ubi)
+
+plot_coverage(data_filt_8330_Ubi)
+
+#MGH
+p3 <- plot_frequency(se_MGH)
+
+#we first filter out proteins that contain too many missing values
+#Filter for proteins that are identified in all replicates of at least one condition
+data_filt_MGH_Ubi <- filter_se(se_MGH, thr = 0)
+
+p4 <- plot_numbers(data_filt_MGH_Ubi)
+
+plot_coverage(data_filt_MGH_Ubi)
+
+(p2 + p4) / (p1 + p3)
+```
+
+
+Data normalization
+```{r}
+# Normalize the data
+data_norm_8330_Ubi <- normalize_vsn(data_filt_8330_Ubi)
+
+# Visualize normalization by boxplots for all samples before and after normalization
+p1 <- plot_normalization(data_filt_8330_Ubi, data_norm_8330_Ubi)
+
+# Normalize the data
+data_norm_MGH_Ubi <- normalize_vsn(data_filt_MGH_Ubi)
+
+# Visualize normalization by boxplots for all samples before and after normalization
+p2 <- plot_normalization(data_filt_MGH_Ubi, data_norm_MGH_Ubi)
+
+p1 + p2
+```
+Heatmap with missing values
+```{r}
+# Plot a heatmap of proteins with missing values
+plot_missval(data_filt_8330_Ubi)
+plot_missval(data_filt_MGH_Ubi)
+
+# Plot intensity distributions and cumulative fraction of proteins with and without missing values
+plot_detect(data_filt_8330_Ubi)
+plot_detect(data_filt_MGH_Ubi)
+
+```
+Missing values - Part 2
+```{r}
+#Indeed the proteins with missing values have on average low intensities. This data (MNAR and close to the detection limit) should be imputed by a left-censored imputation method, such as the quantile regression-based left-censored function (“QRILC”) or random draws from a left-shifted distribution (“MinProb” and “man”)
+
+# Impute missing data using random draws from a Gaussian distribution centered around a minimal value (for MNAR)
+Ubi_data_imp_8330 <- DEP2::impute(data_norm_8330_Ubi, fun = "MinProb", q = 0.01)
+
+# Plot intensity distributions before and after imputation
+plot_imputation(data_norm_8330_Ubi, Ubi_data_imp_8330)
+
+
+###MGH
+
+# Impute missing data using random draws from a Gaussian distribution centered around a minimal value (for MNAR)
+Ubi_data_imp_MGH <- DEP2::impute(data_norm_MGH_Ubi, fun = "MinProb", q = 0.01)
+
+# Plot intensity distributions before and after imputation
+plot_imputation(data_norm_MGH_Ubi, Ubi_data_imp_MGH)
+
+```
+
+Differential enrichment analysis
+```{r}
+# Differential enrichment analysis  based on linear models and empherical Bayes statistics
+
+# Test every sample versus control
+data_diff_8330 <- DEP2::test_diff(Ubi_data_imp_8330, type = "all", fdr.type = "BH")
+
+deu_8330 <- add_rejections(data_diff_8330, alpha = 0.1, lfc = 0)
+
+data_diff_MGH <- DEP2::test_diff(Ubi_data_imp_MGH, type = "all", fdr.type = "BH")
+
+deu_MGH <- add_rejections(data_diff_MGH, alpha = 0.1, lfc = 0)
+
+saveRDS(Ubi_data_imp_8330, file = "Ubi_Ubi_data_imp_8330_BH_new.rds")
+saveRDS(deu_8330, file = "Ubi_deu_8330_BH_new.rds")
+saveRDS(Ubi_data_imp_MGH, file = "Ubi_Ubi_data_imp_MGH_BH_new.rds")
+saveRDS(deu_MGH, file = "Ubi_deu_MGH_BH_new.rds")
+```
+
+Principal component analysis
+```{r}
+plot_pca(deu_8330, x = 1, y = 2, n=5000, point_size = 4, , indicate = "condition") +
+    theme_pubr() + 
+  theme(legend.position = "right") +
+  ggtitle("")
+plot_pca(deu_MGH, x = 1, y = 2, n=5000, point_size = 4, indicate = "condition") +
+  theme_pubr() + 
+  theme(legend.position = "right") +
+  ggtitle("")
+
+# Plot the Pearson correlation matrix
+plot_cor(deu_8330, significant = TRUE, lower = 0, upper = 1, pal = "Reds")
+plot_cor(deu_MGH, significant = TRUE, lower = 0, upper = 1, pal = "Reds")
+```
+
+Heatmap of PCA
+
+```{r}
+plot_heatmap(deu_MGH, type = "centered", col_limit = 3, kmeans = T, k =6)
+
+plot_heatmap(deu_8330, type = "centered", col_limit = 3, kmeans = T, k =6)
+```
+
+Volcano plots
+```{r}
+(plot_volcano(deu_8330, contrast = "DelC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(deu_8330, contrast = "DupC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(deu_8330, contrast = "HomoDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T)) /
+  (plot_volcano(deu_8330, contrast = "PWSTI_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(deu_8330, contrast = "PWSTII_vs_WT", label_size = 3, add_names = TRUE, adjusted = T))
+
+
+(plot_volcano(deu_MGH, contrast = "DelC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(deu_MGH, contrast = "DupC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(deu_MGH, contrast = "HetDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T)) /
+  (plot_volcano(deu_MGH, contrast = "HomoDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(deu_MGH, contrast = "PWSTI_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(deu_MGH, contrast = "PWSTII_vs_WT", label_size = 3, add_names = TRUE, adjusted = T))
+```
+
+Plotting function 
+```{r}
+plotAbundance <- function(data, GOI) {
+  ggboxplot(
+    data.frame(
+      expression = assay(data)[GOI,],
+      genotype = data$condition
+    ),
+  x="genotype",
+  y="expression",
+  fill="genotype",
+  add="jitter",
+  add.params = list(size=3),
+  title = GOI
+  ) +
+    ylab("normalized & imputed log2 intensity") +
+    xlab("") +
+    theme(legend.position = "none") +
+    theme(text = element_text(size=14))
+}
+```
+
+Testing plotting function
+```{r}
+
+
+plotAbundance(data = Ubi_data_imp_8330, GOI = "CALM1;CALM2;CALM3")
+plotAbundance(data = Ubi_data_imp_MGH, GOI = "CALM1;CALM2;CALM3")
+
+```
+
+
+Comparison mutants vs WT
+```{r}
+deu_8330 <- rowData(deu_8330)
+
+comparisons_deu <- c("DelC_vs_WT", "DupC_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+list_8330_new_Ubi_up <- list()
+for (comp in comparisons_deu) {
+  
+  # Extract significant results
+  signif_genes <- deu_8330$name[which(deu_8330[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_8330[,paste0(comp, "_diff")] > 0)]
+  
+  list_8330_new_Ubi_up[[comp]] <- signif_genes
+}
+
+list_8330_new_Ubi_down <- list()
+for (comp in comparisons_deu) {
+  
+  # Extract significant results
+  signif_genes <- deu_8330$name[which(deu_8330[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_8330[,paste0(comp, "_diff")] < 0)]
+  
+  list_8330_new_Ubi_down[[comp]] <- signif_genes
+}
+
+names(list_8330_new_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(list_8330_new_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+
+
+
+
+deu_MGH <- rowData(deu_MGH)
+comparisons_deu <- c("DelC_vs_WT", "DupC_vs_WT", "HetDel_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+list_MGH_new_Ubi_up <- list()
+for (comp in comparisons_deu) {
+  
+  # Extract significant results
+  signif_genes <- deu_MGH$name[which(deu_MGH[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_MGH[,paste0(comp, "_diff")] > 0)]
+  
+  list_MGH_new_Ubi_up[[comp]] <- signif_genes
+}
+
+list_MGH_new_Ubi_down <- list()
+for (comp in comparisons_deu) {
+  
+  # Extract significant results
+  signif_genes <- deu_MGH$name[which(deu_MGH[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_MGH[,paste0(comp, "_diff")] < 0)]
+  
+  list_MGH_new_Ubi_down[[comp]] <- signif_genes
+}
+
+names(list_MGH_new_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HetDel_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(list_MGH_new_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HetDel_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+```
+
+
+Overlapping the DEUs from both backgrounds
+```{r}
+# --- Upregulated Proteins ---
+
+# DelC_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_DelC_up,
+                "8330" = list_8330_new_Ubi_up$Protein_DelC_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - DelC")  # Add a title
+
+# DupC_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_DupC_up,
+                "8330" = list_8330_new_Ubi_up$Protein_DupC_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - DupC")
+
+# HetDel_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_HetDel_up,
+                "8330" = list_8330_new_Ubi_up$Protein_HetDel_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - HetDel")
+
+# HomoDel_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_HomoDel_up,
+                "8330" = list_8330_new_Ubi_up$Protein_HomoDel_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - HomoDel")
+
+# PWSTI_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_PWSTI_up,
+                "8330" = list_8330_new_Ubi_up$Protein_PWSTI_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - PWSTI")
+
+# PWSTII_up
+plot(euler(list("MGH" = list_MGH_new_Ubi_up$Protein_PWSTII_up,
+                "8330" = list_8330_new_Ubi_up$Protein_PWSTII_up)),
+     quantities = TRUE,
+     main = "Upregulated Proteins - PWSTII")
+
+
+list_Ubi_up_overlap <-
+  list(
+    "overlap_DEU_DelC" = intersect(list_MGH_new_Ubi_up$Protein_DelC_up,
+                                    list_8330_new_Ubi_up$Protein_DelC_up),
+    "overlap_DEU_DupC" = intersect(list_MGH_new_Ubi_up$Protein_DupC_up,
+                                    list_8330_new_Ubi_up$Protein_DupC_up),
+    "overlap_DEU_HetDel" = intersect(list_MGH_new_Ubi_up$Protein_HetDel_up,
+                                     list_8330_new_Ubi_up$Protein_HetDel_up),
+    "overlap_DEU_HomoDel" = intersect(list_MGH_new_Ubi_up$Protein_HomoDel_up,
+                                      list_8330_new_Ubi_up$Protein_HomoDel_up),
+    "overlap_DEU_PWSTI" = intersect(list_MGH_new_Ubi_up$Protein_PWSTI_up,
+                                    list_8330_new_Ubi_up$Protein_PWSTI_up),
+    "overlap_DEU_PWSTII" = intersect(list_MGH_new_Ubi_up$Protein_PWSTII_up,
+                                     list_8330_new_Ubi_up$Protein_PWSTII_up)
+  )
+
+# --- Downregulated Proteins ---
+
+# DelC_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_DelC_down,
+                "8330" = list_8330_new_Ubi_down$Protein_DelC_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - DelC") # Add a title
+
+# DupC_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_DupC_down,
+                "8330" = list_8330_new_Ubi_down$Protein_DupC_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - DupC")
+
+# HetDel_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_HetDel_down,
+                "8330" = list_8330_new_Ubi_down$Protein_HetDel_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - HetDel")
+
+# HomoDel_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_HomoDel_down,
+                "8330" = list_8330_new_Ubi_down$Protein_HomoDel_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - HomoDel")
+
+# PWSTI_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_PWSTI_down,
+                "8330" = list_8330_new_Ubi_down$Protein_PWSTI_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - PWSTI")
+
+# PWSTII_down
+plot(euler(list("MGH" = list_MGH_new_Ubi_down$Protein_PWSTII_down,
+                "8330" = list_8330_new_Ubi_down$Protein_PWSTII_down)),
+     quantities = TRUE,
+     main = "Downregulated Proteins - PWSTII")
+
+
+list_Ubi_down_overlap <-
+  list(
+    "overlap_DEU_DelC" = intersect(list_MGH_new_Ubi_down$Protein_DelC_down,
+                                    list_8330_new_Ubi_down$Protein_DelC_down),
+    "overlap_DEU_DupC" = intersect(list_MGH_new_Ubi_down$Protein_DupC_down,
+                                    list_8330_new_Ubi_down$Protein_DupC_down),
+    "overlap_DEU_HetDel" = intersect(list_MGH_new_Ubi_down$Protein_HetDel_down,
+                                     list_8330_new_Ubi_down$Protein_HetDel_down),
+    "overlap_DEU_HomoDel" = intersect(list_MGH_new_Ubi_down$Protein_HomoDel_down,
+                                      list_8330_new_Ubi_down$Protein_HomoDel_down),
+    "overlap_DEU_PWSTI" = intersect(list_MGH_new_Ubi_down$Protein_PWSTI_down,
+                                    list_8330_new_Ubi_down$Protein_PWSTI_down),
+    "overlap_DEU_PWSTII" = intersect(list_MGH_new_Ubi_down$Protein_PWSTII_down,
+                                     list_8330_new_Ubi_down$Protein_PWSTII_down)
+  )
+
+lapply(list_Ubi_down_overlap, length)
+
+```
+
+
+
+Prepare lists of DEU and significantly enriched GO-terms for the respective comparisons of overlap analysis - MGH
+```{r}
+deu_MGH_results_new <- readRDS(file = "Ubi_Ubi_dep_MGH_BH_new.rds")
+deu_8330_results_new <- readRDS(file = "Ubi_Ubi_dep_8330_BH_new.rds")
+
+
+
+deu_MGH_new_results <- rowData(deu_MGH_results_new)
+
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HetDel_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+list_MGH_new_Ubi_up <- list()
+for (comp in comparisons_DEU) {
+  
+  # Extract significant results
+  signif_genes <- deu_MGH_new_results$name[which(deu_MGH_new_results[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_MGH_new_results[,paste0(comp, "_diff")] > 0)]
+  
+  list_MGH_new_Ubi_up[[comp]] <- signif_genes
+}
+
+
+
+list_MGH_new_Ubi_down <- list()
+for (comp in comparisons_DEU) {
+  
+  # Extract significant results
+  signif_genes <- deu_MGH_new_results$name[which(deu_MGH_new_results[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_MGH_new_results[,paste0(comp, "_diff")] < 0)]
+  
+  list_MGH_new_Ubi_down[[comp]] <- signif_genes
+}
+
+names(list_MGH_new_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HetDel_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(list_MGH_new_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HetDel_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+```
+
+
+Prepare lists of DEU and significantly enriched GO-terms for the respective comparisons of overlap analysis - 8330
+```{r}
+deu_8330_new_results <- rowData(deu_8330_results_new)
+
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+list_8330_new_Ubi_up <- list()
+for (comp in comparisons_DEU) {
+  
+  # Extract significant results
+  signif_genes <- deu_8330_new_results$name[which(deu_8330_new_results[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_8330_new_results[,paste0(comp, "_diff")] > 0)]
+  
+  list_8330_new_Ubi_up[[comp]] <- signif_genes
+}
+
+
+
+list_8330_new_Ubi_down <- list()
+for (comp in comparisons_DEU) {
+  
+  # Extract significant results
+  signif_genes <- deu_8330_new_results$name[which(deu_8330_new_results[,paste0(comp, "_p.adj")] < 0.1 &
+                                               deu_8330_new_results[,paste0(comp, "_diff")] < 0)]
+  
+  list_8330_new_Ubi_down[[comp]] <- signif_genes
+}
+
+names(list_8330_new_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(list_8330_new_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+```
+
+
+
+
+Preparing GO lists - MGH Ubiquitination
+```{r}
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HetDel_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+GO_list_MGH_Ubi_up <- list()
+for (comp in comparisons_DEU) {
+
+  # Create background dataset for hypergeometric testing using all genes tested for significance in the results
+  all_genes <- rowData(deu_MGH_results_new)$name
+
+  # Extract significant results
+  signif_genes <- rowData(deu_MGH_results_new)$name[which(rowData(deu_MGH_results_new)[, paste0(comp, "_p.adj")] < 0.1 &
+                                                            rowData(deu_MGH_results_new)[, paste0(comp, "_diff")] > 0)]
+
+  # Symbol to EntrezID
+  all_genes <- bitr(all_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+  signif_genes <- bitr(signif_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+
+  ego <- enrichGO(gene = signif_genes$ENTREZID,
+                  keyType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "all",
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+  GO_list_MGH_Ubi_up[[comp]] <- ego
+}
+
+###
+
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HetDel_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+GO_list_MGH_Ubi_down <- list()
+for (comp in comparisons_DEU) {
+
+  # Create background dataset for hypergeometric testing using all genes tested for significance in the results
+  all_genes <- rowData(deu_MGH_results_new)$name
+
+  # Extract significant results
+  signif_genes <- rowData(deu_MGH_results_new)$name[which(rowData(deu_MGH_results_new)[, paste0(comp, "_p.adj")] < 0.1 &
+                                                            rowData(deu_MGH_results_new)[, paste0(comp, "_diff")] < 0)]
+
+  # Symbol to EntrezID
+  all_genes <- bitr(all_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+  signif_genes <- bitr(signif_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+
+  ego <- enrichGO(gene = signif_genes$ENTREZID,
+                  keyType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "all",
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+  GO_list_MGH_Ubi_down[[comp]] <- ego
+}
+
+
+names(GO_list_MGH_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HetDel_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(GO_list_MGH_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HetDel_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+
+```
+
+
+Preparing GO lists - 8330 Ubiquitination
+```{r}
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+GO_list_8330_Ubi_up <- list()
+for (comp in comparisons_DEU) {
+
+  # Create background dataset for hypergeometric testing using all genes tested for significance in the results
+  all_genes <- rowData(deu_8330_results_new)$name
+
+  # Extract significant results
+  signif_genes <- rowData(deu_8330_results_new)$name[which(rowData(deu_8330_results_new)[, paste0(comp, "_p.adj")] < 0.1 &
+                                                            rowData(deu_8330_results_new)[, paste0(comp, "_diff")] > 0)]
+
+  # Symbol to EntrezID
+  all_genes <- bitr(all_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+  signif_genes <- bitr(signif_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+
+  ego <- enrichGO(gene = signif_genes$ENTREZID,
+                  keyType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "all",
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+  GO_list_8330_Ubi_up[[comp]] <- ego
+}
+
+###
+
+comparisons_DEU <- c("DelC_vs_WT", "DupC_vs_WT", "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+GO_list_8330_Ubi_down <- list()
+for (comp in comparisons_DEU) {
+
+  # Create background dataset for hypergeometric testing using all genes tested for significance in the results
+  all_genes <- rowData(deu_8330_results_new)$name
+
+  # Extract significant results
+  signif_genes <- rowData(deu_8330_results_new)$name[which(rowData(deu_8330_results_new)[, paste0(comp, "_p.adj")] < 0.1 &
+                                                            rowData(deu_8330_results_new)[, paste0(comp, "_diff")] < 0)]
+
+  # Symbol to EntrezID
+  all_genes <- bitr(all_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+  signif_genes <- bitr(signif_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+
+  ego <- enrichGO(gene = signif_genes$ENTREZID,
+                  keyType = "ENTREZID",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "all",
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+  GO_list_8330_Ubi_down[[comp]] <- ego
+}
+
+
+names(GO_list_8330_Ubi_up) <- c("Protein_DelC_up", "Protein_DupC_up", "Protein_HomoDel_up", "Protein_PWSTI_up", "Protein_PWSTII_up")
+names(GO_list_8330_Ubi_down) <- c("Protein_DelC_down", "Protein_DupC_down", "Protein_HomoDel_down", "Protein_PWSTI_down", "Protein_PWSTII_down")
+
+```
+
+Preparing GO term lists
+
+```{r}
+
+GO_list_MGH_Ubi_up_terms <- list()
+for (comp in names(GO_list_MGH_Ubi_up)) {
+  res <- GO_list_MGH_Ubi_up[[comp]]@result
+  GO_list_MGH_Ubi_up_terms[[comp]] <- res[which(res$p.adjust < 0.05), "Description"]
+}
+GO_list_MGH_Ubi_down_terms <- list()
+for (comp in names(GO_list_MGH_Ubi_down)) {
+  res <- GO_list_MGH_Ubi_down[[comp]]@result
+  GO_list_MGH_Ubi_down_terms[[comp]] <- res[which(res$p.adjust < 0.05), "Description"]
+}
+
+#####
+
+
+GO_list_8330_Ubi_up_terms <- list()
+for (comp in names(GO_list_8330_Ubi_up)) {
+  res <- GO_list_8330_Ubi_up[[comp]]@result
+  GO_list_8330_Ubi_up_terms[[comp]] <- res[which(res$p.adjust < 0.05), "Description"]
+}
+GO_list_8330_Ubi_down_terms <- list()
+for (comp in names(GO_list_8330_Ubi_down)) {
+  res <- GO_list_8330_Ubi_down[[comp]]@result
+  GO_list_8330_Ubi_down_terms[[comp]] <- res[which(res$p.adjust < 0.05), "Description"]
+}
+
+```
+
+
+
+
+Overlapping GO terms from both backgrounds - Downregulated
+```{r}
+
+GO_downregulated_Ubi_overlap <- list(
+  GO_MGH_DEU_DelC = GO_list_MGH_Ubi_down_terms$Protein_DelC_down,
+  GO_8330_DEU_DelC = GO_list_8330_Ubi_down_terms$Protein_DelC_down,
+  GO_MGH_DEU_DupC = GO_list_MGH_Ubi_down_terms$Protein_DupC_down,
+  GO_8330_DEU_DupC = GO_list_8330_Ubi_down_terms$Protein_DupC_down,
+  GO_MGH_DEU_HomoDel = GO_list_MGH_Ubi_down_terms$Protein_HomoDel_down,
+  GO_8330_DEU_HomoDel = GO_list_8330_Ubi_down_terms$Protein_HomoDel_down,
+  GO_MGH_DEU_PWSTI = GO_list_MGH_Ubi_down_terms$Protein_PWSTI_down,
+  GO_8330_DEU_PWSTI = GO_list_8330_Ubi_down_terms$Protein_PWSTI_down,
+  GO_MGH_DEU_PWSTII = GO_list_MGH_Ubi_down_terms$Protein_PWSTII_down,
+  GO_8330_DEU_PWSTII = GO_list_8330_Ubi_down_terms$Protein_PWSTII_down
+)
+
+lapply(GO_downregulated_Ubi_overlap, length)
+
+# Euler Plots mit Labels und Titeln
+plot(euler(list("MGH" = GO_downregulated_Ubi_overlap$GO_MGH_DEU_DelC,
+                "8330" = GO_downregulated_Ubi_overlap$GO_8330_DEU_DelC)), 
+     quantities = TRUE, labels = TRUE, main = "GO Downregulated Ubiquitination - DelC")
+
+plot(euler(list("MGH" = GO_downregulated_Ubi_overlap$GO_MGH_DEU_DupC,
+                "8330" = GO_downregulated_Ubi_overlap$GO_8330_DEU_DupC)), 
+     quantities = TRUE, labels = TRUE, main = "GO Downregulated Ubiquitination - DupC")
+
+plot(euler(list("MGH" = GO_downregulated_Ubi_overlap$GO_MGH_DEU_HomoDel,
+                "8330" = GO_downregulated_Ubi_overlap$GO_8330_DEU_HomoDel)), 
+     quantities = TRUE, labels = TRUE, main = "GO Downregulated Ubiquitination - HomoDel")
+
+plot(euler(list("MGH" = GO_downregulated_Ubi_overlap$GO_MGH_DEU_PWSTI,
+                "8330" = GO_downregulated_Ubi_overlap$GO_8330_DEU_PWSTI)), 
+     quantities = TRUE, labels = TRUE, main = "GO Downregulated Ubiquitination - PWSTI")
+
+plot(euler(list("MGH" = GO_downregulated_Ubi_overlap$GO_MGH_DEU_PWSTII,
+                "8330" = GO_downregulated_Ubi_overlap$GO_8330_DEU_PWSTII)), 
+     quantities = TRUE, labels = TRUE, main = "GO Downregulated Ubiquitination - PWSTII")
+
+GO_list_Ubi_down_overlap_terms <- list(
+  "GO_overlap_DEU_DelC" = intersect(GO_downregulated_Ubi_overlap$GO_MGH_DEU_DelC,
+                                    GO_downregulated_Ubi_overlap$GO_8330_DEU_DelC),
+  "GO_overlap_DEU_DupC" = intersect(GO_downregulated_Ubi_overlap$GO_MGH_DEU_DupC,
+                                    GO_downregulated_Ubi_overlap$GO_8330_DEU_DupC),
+  "GO_overlap_DEU_HomoDel" = intersect(GO_downregulated_Ubi_overlap$GO_MGH_DEU_HomoDel,
+                                       GO_downregulated_Ubi_overlap$GO_8330_DEU_HomoDel),
+  "GO_overlap_DEU_PWSTI" = intersect(GO_downregulated_Ubi_overlap$GO_MGH_DEU_PWSTI,
+                                     GO_downregulated_Ubi_overlap$GO_8330_DEU_PWSTI),
+  "GO_overlap_DEU_PWSTII" = intersect(GO_downregulated_Ubi_overlap$GO_MGH_DEU_PWSTII,
+                                      GO_downregulated_Ubi_overlap$GO_8330_DEU_PWSTII)
+)
+
+```
+
+
+Overlapping GO terms from both backgrounds - Upregulated
+```{r}
+
+GO_upregulated_Ubi_overlap <- list(
+  GO_MGH_DEU_DelC = GO_list_MGH_Ubi_up_terms$Protein_DelC_up,
+  GO_8330_DEU_DelC = GO_list_8330_Ubi_up_terms$Protein_DelC_up,
+  GO_MGH_DEU_DupC = GO_list_MGH_Ubi_up_terms$Protein_DupC_up,
+  GO_8330_DEU_DupC = GO_list_8330_Ubi_up_terms$Protein_DupC_up,
+  GO_MGH_DEU_HomoDel = GO_list_MGH_Ubi_up_terms$Protein_HomoDel_up,
+  GO_8330_DEU_HomoDel = GO_list_8330_Ubi_up_terms$Protein_HomoDel_up,
+  GO_MGH_DEU_PWSTI = GO_list_MGH_Ubi_up_terms$Protein_PWSTI_up,
+  GO_8330_DEU_PWSTI = GO_list_8330_Ubi_up_terms$Protein_PWSTI_up,
+  GO_MGH_DEU_PWSTII = GO_list_MGH_Ubi_up_terms$Protein_PWSTII_up,
+  GO_8330_DEU_PWSTII = GO_list_8330_Ubi_up_terms$Protein_PWSTII_up
+)
+
+lapply(GO_upregulated_Ubi_overlap, length)
+
+# Euler Plots mit Labels und Titeln
+plot(euler(list("MGH" = GO_upregulated_Ubi_overlap$GO_MGH_DEU_DelC,
+                "8330" = GO_upregulated_Ubi_overlap$GO_8330_DEU_DelC)), 
+     quantities = TRUE, labels = TRUE, main = "GO Upregulated Ubiquitination - DelC")
+
+plot(euler(list("MGH" = GO_upregulated_Ubi_overlap$GO_MGH_DEU_DupC,
+                "8330" = GO_upregulated_Ubi_overlap$GO_8330_DEU_DupC)), 
+     quantities = TRUE, labels = TRUE, main = "GO Upregulated Ubiquitination - DupC")
+
+plot(euler(list("MGH" = GO_upregulated_Ubi_overlap$GO_MGH_DEU_HomoDel,
+                "8330" = GO_upregulated_Ubi_overlap$GO_8330_DEU_HomoDel)), 
+     quantities = TRUE, labels = TRUE, main = "GO Upregulated Ubiquitination - HomoDel")
+
+plot(euler(list("MGH" = GO_upregulated_Ubi_overlap$GO_MGH_DEU_PWSTI,
+                "8330" = GO_upregulated_Ubi_overlap$GO_8330_DEU_PWSTI)), 
+     quantities = TRUE, labels = TRUE, main = "GO Upregulated Ubiquitination - PWSTI")
+
+plot(euler(list("MGH" = GO_upregulated_Ubi_overlap$GO_MGH_DEU_PWSTII,
+                "8330" = GO_upregulated_Ubi_overlap$GO_8330_DEU_PWSTII)), 
+     quantities = TRUE, labels = TRUE, main = "GO Upregulated Ubiquitination - PWSTII")
+
+GO_list_Ubi_up_overlap_terms <- list(
+  "GO_overlap_DEU_DelC" = intersect(GO_upregulated_Ubi_overlap$GO_MGH_DEU_DelC,
+                                    GO_upregulated_Ubi_overlap$GO_8330_DEU_DelC),
+  "GO_overlap_DEU_DupC" = intersect(GO_upregulated_Ubi_overlap$GO_MGH_DEU_DupC,
+                                    GO_upregulated_Ubi_overlap$GO_8330_DEU_DupC),
+  "GO_overlap_DEU_HomoDel" = intersect(GO_upregulated_Ubi_overlap$GO_MGH_DEU_HomoDel,
+                                       GO_upregulated_Ubi_overlap$GO_8330_DEU_HomoDel),
+  "GO_overlap_DEU_PWSTI" = intersect(GO_upregulated_Ubi_overlap$GO_MGH_DEU_PWSTI,
+                                     GO_upregulated_Ubi_overlap$GO_8330_DEU_PWSTI),
+  "GO_overlap_DEU_PWSTII" = intersect(GO_upregulated_Ubi_overlap$GO_MGH_DEU_PWSTII,
+                                      GO_upregulated_Ubi_overlap$GO_8330_DEU_PWSTII)
+)
+
+```
+
+
+
+
+
+
+10.9 Upset Plots - GO terms - Ubiquitin only - Preparation
+```{r}
+intersectionsOI_onlyUbi <-
+  list(
+    #single
+    "DEU_DelC", 
+    "DEU_DupC", 
+    "DEU_HomoDel", 
+    "DEU_PWSTI", 
+    "DEU_PWSTII",
+
+    #SYS-specific Ubi
+    c("DEU_DelC", "DEU_DupC"),
+
+    #PWS-specific Ubi
+    c("DEU_PWSTI", "DEU_PWSTII"),
+
+    #deletion-specific Ubi
+    c("DEU_HomoDel",
+         "DEU_PWSTI", "DEU_PWSTII"),
+
+    #all Ubi without DelC
+    c("DEU_DupC",
+         "DEU_HomoDel",
+         "DEU_PWSTI","DEU_PWSTII"),
+
+    #all Ubi
+    c("DEU_DelC","DEU_DupC",
+         "DEU_HomoDel",
+         "DEU_PWSTI","DEU_PWSTII")
+
+    )
+
+
+
+```
+
+
+10.10 Upset Plots - GO terms - Ubiquitin only - Downregulated
+```{r}
+downregulated_onlyUbi <- list(
+  DEU_DelC = list_Ubi_down_overlap$overlap_DEU_DelC,
+  DEU_DupC = list_Ubi_down_overlap$overlap_DEU_DupC,
+  DEU_HomoDel = list_Ubi_down_overlap$overlap_DEU_HomoDel,
+  DEU_PWSTI = list_Ubi_down_overlap$overlap_DEU_PWSTI,
+  DEU_PWSTII = list_Ubi_down_overlap$overlap_DEU_PWSTII
+)
+
+downregulated_complex_onlyUbi <- fromList(downregulated_onlyUbi) == 1
+downregulated_complex_onlyUbi <- as.data.frame(downregulated_complex_onlyUbi)
+
+my_corrected_theme <- list(
+  'intersections_matrix' = theme(
+    legend.margin = margin(t = 5, r = 5, b = 5, l = 5, unit = 'pt')
+  ),
+  'overall_sizes' = theme(
+  ),
+  'selected_theme' = theme() 
+)
+
+#UpSet plot
+
+ComplexUpset::upset(downregulated_complex_onlyUbi,
+      colnames(downregulated_complex_onlyUbi),
+      sort_sets = FALSE,
+      intersections = intersectionsOI_onlyUbi,
+      sort_intersections=FALSE,
+      theme = my_corrected_theme,
+
+      ) +
+  rremove("xlab")
+
+
+
+
+#Query intersections of interest
+
+downregulated_onlyUbi_df <- fromList(downregulated_onlyUbi)
+downregulated_onlyUbi_df$GO <- unique(unlist(downregulated_onlyUbi))
+
+downregulated_onlyUbi_df_with_intersection <- downregulated_onlyUbi_df %>%
+  tidyr::unite(col = "intersection", -c("GO"), sep = "")
+
+downregulated_onlyUbi_df_with_intersection <-
+  downregulated_onlyUbi_df_with_intersection %>%
+  group_by(intersection) %>%
+  summarise(list = list(GO)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+#DelC ubi-specific
+downregulated_onlyUbi_df_with_intersection[["10000"]]
+
+#DupC ubi-specific
+downregulated_onlyUbi_df_with_intersection[["01000"]]
+
+#HomoDel ubi-specific
+downregulated_onlyUbi_df_with_intersection[["00100"]]
+
+#PWSTI ubi-specific
+downregulated_onlyUbi_df_with_intersection[["00010"]]
+
+#PWSTII ubi-specific
+downregulated_onlyUbi_df_with_intersection[["00001"]]
+
+#SYS ubi only
+downregulated_onlyUbi_df_with_intersection[["11000"]]
+
+#PWS ubi only
+downregulated_onlyUbi_df_with_intersection[["00011"]]
+
+#PWS and MAGEL2-del ubi only
+downregulated_onlyUbi_df_with_intersection[["00111"]]
+
+#all DelC-exclusive ubi only
+downregulated_onlyUbi_df_with_intersection[["01111"]]
+
+#all ubi
+downregulated_onlyUbi_df_with_intersection[["11111"]]
+```
+
+10.10 Upset Plots - GO terms - Ubiquitin only - Upregulated
+```{r}
+upregulated_onlyUbi <- list(
+  DEU_DelC = list_Ubi_up_overlap$overlap_DEU_DelC,
+  DEU_DupC = list_Ubi_up_overlap$overlap_DEU_DupC,
+  DEU_HomoDel = list_Ubi_up_overlap$overlap_DEU_HomoDel,
+  DEU_PWSTI = list_Ubi_up_overlap$overlap_DEU_PWSTI,
+  DEU_PWSTII = list_Ubi_up_overlap$overlap_DEU_PWSTII
+)
+
+upregulated_complex_onlyUbi <- fromList(upregulated_onlyUbi) == 1
+upregulated_complex_onlyUbi <- as.data.frame(upregulated_complex_onlyUbi)
+
+#UpSet plot
+
+ComplexUpset::upset(upregulated_complex_onlyUbi,
+      colnames(upregulated_complex_onlyUbi),
+      sort_sets = FALSE,
+      intersections = intersectionsOI_onlyUbi,
+      sort_intersections=FALSE,
+      theme = my_corrected_theme,
+
+      ) +
+  rremove("xlab")
+
+
+
+
+#Query intersections of interest
+
+upregulated_onlyUbi_df <- fromList(upregulated_onlyUbi)
+upregulated_onlyUbi_df$GO <- unique(unlist(upregulated_onlyUbi))
+
+upregulated_onlyUbi_df_with_intersection <- upregulated_onlyUbi_df %>%
+  tidyr::unite(col = "intersection", -c("GO"), sep = "")
+
+upregulated_onlyUbi_df_with_intersection <-
+  upregulated_onlyUbi_df_with_intersection %>%
+  group_by(intersection) %>%
+  summarise(list = list(GO)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+#DelC ubi-specific
+upregulated_onlyUbi_df_with_intersection[["10000"]]
+
+#DupC ubi-specific
+upregulated_onlyUbi_df_with_intersection[["01000"]]
+
+#HomoDel ubi-specific
+upregulated_onlyUbi_df_with_intersection[["00100"]]
+
+#PWSTI ubi-specific
+upregulated_onlyUbi_df_with_intersection[["00010"]]
+
+#PWSTII ubi-specific
+upregulated_onlyUbi_df_with_intersection[["00001"]]
+
+#SYS ubi only
+upregulated_onlyUbi_df_with_intersection[["11000"]]
+
+#PWS ubi only
+upregulated_onlyUbi_df_with_intersection[["00011"]]
+
+#PWS and MAGEL2-del ubi only
+upregulated_onlyUbi_df_with_intersection[["00111"]]
+
+#all DelC-exclusive ubi only
+upregulated_onlyUbi_df_with_intersection[["01111"]]
+
+#all ubi
+upregulated_onlyUbi_df_with_intersection[["11111"]]
+```

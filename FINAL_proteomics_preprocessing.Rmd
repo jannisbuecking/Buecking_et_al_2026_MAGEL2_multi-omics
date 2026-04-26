@@ -1,0 +1,272 @@
+---
+title: "Untitled"
+author: "Michael Eibl"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r}
+library("DESeq2")
+library("stringr")
+library("ggplot2")
+library("ggpubr")
+library("RNAseqQC")
+library("dplyr")
+library("patchwork")
+library("org.Hs.eg.db")
+library("annotate")
+library("AnnotationHub")
+library('EnhancedVolcano')
+library("gridExtra")
+library("grid")
+library("clusterProfiler")
+library("eulerr")
+library("ComplexHeatmap")
+library("openxlsx")
+library("Homo.sapiens")
+library("dplyr")
+library("limma")
+library("DEP2")
+library("patchwork")
+```
+
+```{r}
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+```
+
+
+```{r}
+abundance <- read.xlsx(xlsxFile = "./Final_Full_Proteome_Azmal.xlsx")
+
+abundance <- abundance[which(!duplicated(abundance$PG.Genes)), ]
+abundance <- abundance[which(!is.na(abundance$PG.Genes)),]
+
+rownames(abundance) <- abundance$PG.Genes
+
+colnames(abundance) <- gsub("FP_", "", colnames(abundance))
+colnames(abundance) <- gsub(".1", "", colnames(abundance))
+colnames(abundance) <- gsub(".2", "", colnames(abundance))
+
+colnames(abundance)[3:44] <- paste(colnames(abundance)[3:44], rep(c("1", "2", "3"), 14), sep="_")
+colnames(abundance) <- gsub("^M_WT", "MG_WT", colnames(abundance))
+
+proteins_all <- rownames(abundance)
+
+
+#make columns with protein abundance numeric (default is character)
+abundance[,3:44] <- sapply(abundance[,3:44], as.numeric)
+
+#downstream NaNs are not allowed and should be replaced by NA
+abundance <- abundance %>% as.data.frame(.) %>% mutate_all(~ifelse(is.nan(.), NA, .))
+
+rownames(abundance) <- proteins_all
+
+#reverse log2 transformation, because DEP package (make_unique) will log2 transform
+abundance[,3:44] <- 2^abundance[,3:44]
+```
+
+
+```{r}
+# Generate a SummarizedExperiment object by parsing condition information from the column names
+experimental_design <- data.frame(row.names = colnames(abundance[,3:44]),
+                                  genotype = rep(NA, ncol(abundance[,3:44])),
+                                  background = rep(NA, ncol(abundance[,3:44])),
+                                  replicate = rep(NA, ncol(abundance[,3:44])))
+
+
+
+for (i in 1:ncol(abundance[,3:44])) {
+  experimental_design[i, "genotype"] <- str_split(colnames(abundance[,3:44])[i], pattern = "_")[[1]][2]
+  experimental_design[i, "background"] <- str_split(colnames(abundance[,3:44])[i], pattern = "_")[[1]][1]
+  experimental_design[i, "replicate"] <- str_split(colnames(abundance[,3:44])[i], pattern = "_")[[1]][3]
+}
+
+experimental_design$ID <- 1:42
+experimental_design$name <- rownames(experimental_design)
+
+colnames(experimental_design)[c(1,5)] <- c("condition", "label")
+
+experimental_design$ID <- factor(experimental_design$ID)
+experimental_design$condition <- factor(experimental_design$condition)
+
+saveRDS(experimental_design, file = "proteomics_sample_info.rds")
+
+abundance_unique_8330 <- DEP2::make_unique(proteins = abundance[,c(1,2,which(experimental_design$background == "GM")+2)],
+                                     names = "PG.Genes",
+                                     ids = "PG.ProteinGroups",
+                                     delim = ",")
+
+se_8330 <- DEP2::make_se(proteins_unique = abundance_unique_8330,
+                   columns = 3:23,
+                   expdesign = experimental_design[which(experimental_design$background == "GM"),])
+
+
+abundance_unique_MGH <- DEP2::make_unique(proteins = abundance[,c(1,2,which(experimental_design$background == "MG")+2)],
+                                    names = "PG.Genes",
+                                    ids = "PG.ProteinGroups",
+                                    delim = ",")
+
+se_MGH <- DEP2::make_se(proteins_unique = abundance_unique_MGH,
+                  columns = 3:23,
+                  expdesign = experimental_design[which(experimental_design$background == "MG"),])
+```
+
+
+```{r}
+#8330
+p1 <- plot_frequency(se_8330)
+
+#we first filter out proteins that contain too many missing values
+#Filter for proteins that are identified in all replicates of at least one condition
+data_filt_8330 <- filter_se(se_8330, thr = 0)
+
+p2 <- plot_numbers(data_filt_8330)
+
+plot_coverage(data_filt_8330)
+
+#MGH
+p3 <- plot_frequency(se_MGH)
+
+#we first filter out proteins that contain too many missing values
+#Filter for proteins that are identified in all replicates of at least one condition
+data_filt_MGH <- filter_se(se_MGH, thr = 0)
+
+p4 <- plot_numbers(data_filt_MGH)
+
+plot_coverage(data_filt_MGH)
+
+(p2 + p4) / (p1 + p3)
+```
+
+```{r}
+# Normalize the data
+data_norm_8330 <- normalize_vsn(data_filt_8330)
+
+# Visualize normalization by boxplots for all samples before and after normalization
+p1 <- plot_normalization(data_filt_8330, data_norm_8330)
+
+# Normalize the data
+data_norm_MGH <- normalize_vsn(data_filt_MGH)
+
+# Visualize normalization by boxplots for all samples before and after normalization
+p2 <- plot_normalization(data_filt_MGH, data_norm_MGH)
+
+p1 + p2
+```
+
+```{r}
+# Plot a heatmap of proteins with missing values
+plot_missval(data_filt_8330)
+plot_missval(data_filt_MGH)
+
+# Plot intensity distributions and cumulative fraction of proteins with and without missing values
+p1 <- plot_detect(data_filt_8330)
+p2 <- plot_detect(data_filt_MGH)
+```
+
+```{r}
+#Indeed the proteins with missing values have on average low intensities. This data (MNAR and close to the detection limit) should be imputed by a left-censored imputation method, such as the quantile regression-based left-censored function (“QRILC”) or random draws from a left-shifted distribution (“MinProb” and “man”)
+
+# Impute missing data using random draws from a Gaussian distribution centered around a minimal value (for MNAR)
+new_data_imp_8330 <- DEP2::impute(data_norm_8330, fun = "MinProb", q = 0.01)
+
+# Plot intensity distributions before and after imputation
+plot_imputation(data_norm_8330, new_data_imp_8330)
+
+
+###MGH
+
+# Impute missing data using random draws from a Gaussian distribution centered around a minimal value (for MNAR)
+new_data_imp_MGH <- DEP2::impute(data_norm_MGH, fun = "MinProb", q = 0.01)
+
+# Plot intensity distributions before and after imputation
+plot_imputation(data_norm_MGH, new_data_imp_MGH)
+
+```
+
+
+```{r}
+# Differential enrichment analysis  based on linear models and empherical Bayes statistics
+
+# Test every sample versus control
+data_diff_8330 <- test_diff(new_data_imp_8330, type = "all", fdr.type = "BH")
+
+dep_8330 <- add_rejections(data_diff_8330, alpha = 0.05, lfc = 1)
+
+data_diff_MGH <- test_diff(new_data_imp_MGH, type = "all", fdr.type = "BH")
+
+dep_MGH <- add_rejections(data_diff_MGH, alpha = 0.05, lfc = 1)
+
+saveRDS(new_data_imp_8330, file = "new_data_imp_8330_BH_new.rds")
+saveRDS(dep_8330, file = "dep_8330_BH_new.rds")
+saveRDS(new_data_imp_MGH, file = "new_data_imp_MGH_BH_new.rds")
+saveRDS(dep_MGH, file = "dep_MGH_BH_new.rds")
+```
+
+
+```{r}
+plot_pca(dep_8330, x = 1, y = 2, n=5000, point_size = 4, , indicate = "condition") +
+    theme_pubr() + 
+  theme(legend.position = "right") +
+  ggtitle("")
+plot_pca(dep_MGH, x = 1, y = 2, n=5000, point_size = 4, indicate = "condition") +
+  theme_pubr() + 
+  theme(legend.position = "right") +
+  ggtitle("")
+
+# Plot the Pearson correlation matrix
+plot_cor(dep_8330, significant = TRUE, lower = 0, upper = 1, pal = "Reds")
+plot_cor(dep_MGH, significant = TRUE, lower = 0, upper = 1, pal = "Reds")
+```
+
+```{r}
+plot_heatmap(dep_MGH, type = "centered", col_limit = 3, kmeans = T, k =6)
+
+plot_heatmap(dep_8330, type = "centered", col_limit = 3, kmeans = T, k =6)
+```
+
+```{r}
+(plot_volcano(dep_8330, contrast = "DelC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(dep_8330, contrast = "DupC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(dep_8330, contrast = "HetDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T)) /
+  (plot_volcano(dep_8330, contrast = "HomoDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(dep_8330, contrast = "PWSTI_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(dep_8330, contrast = "PWSTII_vs_WT", label_size = 3, add_names = TRUE, adjusted = T))
+
+
+(plot_volcano(dep_MGH, contrast = "DelC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(dep_MGH, contrast = "DupC_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+  plot_volcano(dep_MGH, contrast = "HetDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T)) /
+  (plot_volcano(dep_MGH, contrast = "HomoDel_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(dep_MGH, contrast = "PWSTI_vs_WT", label_size = 3, add_names = TRUE, adjusted = T) +
+     plot_volcano(dep_MGH, contrast = "PWSTII_vs_WT", label_size = 3, add_names = TRUE, adjusted = T))
+```
+
+
+```{r}
+plotAbundance <- function(data, GOI) {
+  ggboxplot(
+    data.frame(
+      expression = assay(data)[GOI,],
+      genotype = new_data_imp_8330$condition
+    ),
+  x="genotype",
+  y="expression",
+  fill="genotype",
+  add="jitter",
+  add.params = list(size=3),
+  title = GOI
+  ) +
+    ylab("normalized & imputed log2 intensity") +
+    xlab("") +
+    theme(legend.position = "none") +
+   theme(text = element_text(size=14),
+          axis.text.x = element_text(hjust = 1, angle=45, size = 14),
+          axis.text.y = element_text(size = 12)) + rremove("legend")
+}
+```
+

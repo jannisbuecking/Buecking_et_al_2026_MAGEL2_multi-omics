@@ -1,0 +1,384 @@
+---
+title: "ubiProt"
+output: html_document
+date: "2025-02-25"
+---
+
+UbiProt Scatter Plots
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(ggrepel)
+
+# --- Load the ubiquitomics results ---
+dep_ubi_MGH_new_results <- readRDS(file = "Ubi_dep_MGH_BH_new.rds")
+dep_ubi_8330_new_results <- readRDS(file = "Ubi_dep_8330_BH_new.rds")
+
+# --- Load the proteomics results ---
+dep_pro_MGH_new_results <- readRDS(file = "dep_MGH_BH_new.rds")
+dep_pro_8330_new_results <- readRDS(file = "dep_8330_BH_new.rds")
+
+# ==============================================================================
+# STEP 1: DEFINE THE COMMON UBIQUITOME UNIVERSE
+# ==============================================================================
+
+# Extract gene names
+genes_ubi_MGH <- rowData(dep_ubi_MGH_new_results)$name
+genes_ubi_8330 <- rowData(dep_ubi_8330_new_results)$name
+
+# Clean names (uppercase + trim) to ensure matches
+genes_ubi_MGH_clean <- trimws(toupper(genes_ubi_MGH))
+genes_ubi_8330_clean <- trimws(toupper(genes_ubi_8330))
+
+# Find intersection: Proteins present in ALL ubiquitome datasets
+common_ubi_genes <- intersect(genes_ubi_MGH_clean, genes_ubi_8330_clean)
+
+# Print the list count
+cat("\n------------------------------------------------------------\n")
+cat("PROTEIN COUNT SUMMARY:\n")
+cat("Proteins in MGH Ubiquitome: ", length(genes_ubi_MGH_clean), "\n")
+cat("Proteins in 8330 Ubiquitome:", length(genes_ubi_8330_clean), "\n")
+cat("Proteins present in ALL Ubiquitome datasets (Intersection):", length(common_ubi_genes), "\n")
+cat("------------------------------------------------------------\n\n")
+
+
+# ==============================================================================
+# STEP 2: SCATTER PLOT FUNCTION
+# ==============================================================================
+
+create_scatter_plot <- function(condition) {
+  
+  # --- Extract data for MGH background ---
+  ubi_fc_MGH <- rowData(dep_ubi_MGH_new_results)[, paste0(condition, "_vs_WT_diff")]
+  pro_fc_MGH <- rowData(dep_pro_MGH_new_results)[, paste0(condition, "_vs_WT_diff")]
+  ubi_genes_MGH <- rowData(dep_ubi_MGH_new_results)$name
+  pro_genes_MGH <- rowData(dep_pro_MGH_new_results)$name
+  ubi_pvals_MGH <- rowData(dep_ubi_MGH_new_results)[, paste0(condition, "_vs_WT_p.adj")]
+  pro_pvals_MGH <- rowData(dep_pro_MGH_new_results)[, paste0(condition, "_vs_WT_p.adj")]
+  
+  # Create DF
+  ubi_df_MGH <- data.frame(gene = toupper(trimws(ubi_genes_MGH)), fc = ubi_fc_MGH, pval = ubi_pvals_MGH)
+  pro_df_MGH <- data.frame(gene = toupper(trimws(pro_genes_MGH)), fc = pro_fc_MGH, pval = pro_pvals_MGH)
+  
+  # --- Extract data for 8330 background ---
+  ubi_fc_8330 <- rowData(dep_ubi_8330_new_results)[, paste0(condition, "_vs_WT_diff")]
+  pro_fc_8330 <- rowData(dep_pro_8330_new_results)[, paste0(condition, "_vs_WT_diff")]
+  ubi_genes_8330 <- rowData(dep_ubi_8330_new_results)$name
+  pro_genes_8330 <- rowData(dep_pro_8330_new_results)$name
+  ubi_pvals_8330 <- rowData(dep_ubi_8330_new_results)[, paste0(condition, "_vs_WT_p.adj")]
+  pro_pvals_8330 <- rowData(dep_pro_8330_new_results)[, paste0(condition, "_vs_WT_p.adj")]
+  
+  # Create DF
+  ubi_df_8330 <- data.frame(gene = toupper(trimws(ubi_genes_8330)), fc = ubi_fc_8330, pval = ubi_pvals_8330)
+  pro_df_8330 <- data.frame(gene = toupper(trimws(pro_genes_8330)), fc = pro_fc_8330, pval = pro_pvals_8330)
+  
+  # --- FILTER: Keep only genes in our Common Ubiquitome Universe ---
+  ubi_df_MGH <- ubi_df_MGH %>% dplyr::filter(gene %in% common_ubi_genes)
+  ubi_df_8330 <- ubi_df_8330 %>% dplyr::filter(gene %in% common_ubi_genes)
+  
+  # --- Merge with Proteomics (Intersection) ---
+  # Note: This will drop proteins that are in the Ubiquitome universe but MISSING in proteomics
+  merged_df_MGH <- merge(ubi_df_MGH, pro_df_MGH, by = "gene", suffixes = c("_ubi_MGH", "_pro_MGH"))
+  merged_df_8330 <- merge(ubi_df_8330, pro_df_8330, by = "gene", suffixes = c("_ubi_8330", "_pro_8330"))
+  
+  # --- Merge Backgrounds ---
+  merged_df <- merge(merged_df_MGH, merged_df_8330, by = "gene")
+  
+  # --- Print Final Count for this Plot ---
+  cat(paste0("Plot '", condition, "': ", nrow(merged_df), " proteins (Common Ubi + Common Pro)\n"))
+  
+  # --- Significance Logic ---
+  merged_df$significant <- ifelse(
+    (merged_df$pval_ubi_MGH < 0.1 & merged_df$pval_ubi_8330 < 0.1),
+    "p-adj. < 0.05 in both backgrounds (ubiquitomics)",
+    "no"
+  )
+  
+  # --- Labeling ---
+  proteins_to_label <- c("NDN","CALM1;CALM2;CALM3", "ANXA6", "RHOA", "TAGLN3", "LMNB1", "CALR", "PRSS3", "LIN28A")
+  merged_df$label <- ifelse(merged_df$gene %in% proteins_to_label, merged_df$gene, "")
+  
+  # --- Plotting ---
+  p <- ggplot(merged_df, aes(x = fc_pro_MGH, y = fc_ubi_MGH, color = significant)) +
+    geom_point(data = merged_df[merged_df$significant == "no", ], color = "#ebebeb", size = 2) +
+    geom_point(data = merged_df[merged_df$significant == "p-adj. < 0.05 in both backgrounds (ubiquitomics)", ], color = "#c0c0c0", size = 2) +
+    geom_point(data = merged_df[merged_df$label != "", ], color = "#b34747", size = 2) +
+    geom_text_repel(aes(label = label), data = merged_df[merged_df$label != "", ], color = "#b34747",
+                    size = 3, box.padding = 0.5, point.padding = 0.5, max.overlaps = 20) +
+    labs(
+      x = "Log2 Fold Change (Proteomics)",
+      y = "Log2 Fold Change (Ubiquitomics)",
+      title = paste0(condition, " vs WT Fold Changes (MGH and 8330 Backgrounds)"),
+      color = "" 
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) +
+    guides(color = guide_legend(override.aes = list(color = "#c0c0c0", size = 3, shape = 19))) +
+    xlim(c(-5, 5)) + ylim(c(-4, 4))
+  
+  return(p)
+}
+
+# --- Create scatter plots for each condition ---
+conditions <- c("DelC", "DupC", "HomoDel", "PWSTI", "PWSTII")
+for (condition in conditions) {
+  print(create_scatter_plot(condition))
+}
+```
+
+
+Proteins that are in the ubiquitine data set but not the proteome one
+```{r}
+# ==============================================================================
+# INVESTIGATING THE "UBIQUITOME-ONLY" PROTEINS
+# ==============================================================================
+
+# --- 1. Re-Define the Common Ubiquitome (5,039 proteins) ---
+genes_ubi_MGH <- rowData(dep_ubi_MGH_new_results)$name
+genes_ubi_8330 <- rowData(dep_ubi_8330_new_results)$name
+common_ubi_genes <- intersect(trimws(toupper(genes_ubi_MGH)), trimws(toupper(genes_ubi_8330)))
+
+# --- 2. Define the Common Proteome ---
+genes_pro_MGH <- rowData(dep_pro_MGH_new_results)$name
+genes_pro_8330 <- rowData(dep_pro_8330_new_results)$name
+# We look for proteins present in EITHER proteome dataset to be safe, 
+# or strictly BOTH if you want to match your previous strict filtering.
+# Based on your plot logic, you required them in ALL datasets, so let's check that.
+common_pro_genes <- intersect(trimws(toupper(genes_pro_MGH)), trimws(toupper(genes_pro_8330)))
+
+# --- 3. Find the Difference (Ubi ONLY) ---
+# Which genes are in 'common_ubi' but NOT in 'common_pro'?
+ubi_only_genes <- setdiff(common_ubi_genes, common_pro_genes)
+
+# --- 4. Output the Results ---
+cat("\n------------------------------------------------------------\n")
+cat("MISSING PROTEIN ANALYSIS\n")
+cat("------------------------------------------------------------\n")
+cat("Total Common Ubiquitome Genes: ", length(common_ubi_genes), "\n")
+cat("Total Common Proteome Genes:   ", length(common_pro_genes), "\n")
+cat("\n")
+cat("Proteins found in Ubiquitome but MISSING in Proteome: ", length(ubi_only_genes), "\n")
+cat("------------------------------------------------------------\n")
+
+# Print the list (first 200)
+if(length(ubi_only_genes) > 0) {
+  print(head(ubi_only_genes, 200))
+  
+  # Optional: Write to file if list is huge
+  # write.csv(ubi_only_genes, "Proteins_Unique_to_Ubiquitome.csv")
+}
+```
+
+
+
+Ridgeline Plots Ubiquitome-Proteome-Ratio
+```{r}
+# --- Step 1: Load Libraries ---
+library(ggplot2)
+library(dplyr)
+library(openxlsx)
+library(ggridges)
+library(tidyr) # Ensure tidyr is loaded for pivot/gather if needed
+
+# --- Step 2: Setup Themes & Colors ---
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+condition_order <- c("DelC", "DupC", "HetDel", "HomoDel", "PWSTI", "PWSTII", "WT")
+genotype_colors <- gg_color_hue(length(condition_order))
+names(genotype_colors) <- condition_order
+
+# Updated Theme
+publication_theme <- theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 10)),
+    axis.text.y = element_text(face = "bold"),
+    axis.title.y = element_blank(),
+    legend.position = "none"
+  )
+
+# --- Step 3: Load Data ---
+abundance_ubi <- read.xlsx(xlsxFile = "./Ubiquitination_IP_Azmal.xlsx")
+abundance_ubi <- abundance_ubi[!duplicated(abundance_ubi$PG.Genes) & !is.na(abundance_ubi$PG.Genes), ]
+rownames(abundance_ubi) <- toupper(trimws(abundance_ubi$PG.Genes))
+
+abundance_pro <- read.xlsx(xlsxFile = "./Final_Full_Proteome_Azmal.xlsx")
+abundance_pro <- abundance_pro[!duplicated(abundance_pro$PG.Genes) & !is.na(abundance_pro$PG.Genes), ]
+rownames(abundance_pro) <- toupper(trimws(abundance_pro$PG.Genes))
+
+common_genes <- intersect(rownames(abundance_ubi), rownames(abundance_pro))
+
+# --- Step 4: Robust Ratio Calculation Function ---
+calculate_ratio_robust <- function(condition, ubi_data, pro_data, ubi_prefix, pro_prefix_main, pro_prefix_wt) {
+  
+  # 1. Identify Columns
+  ubi_condition_pattern <- case_when(
+    condition == "DelC" ~ "Del", condition == "DupC" ~ "DUPC",
+    condition == "HetDel" ~ "HET", condition == "HomoDel" ~ "HOM",
+    condition == "PWSTI" ~ "PWS1", condition == "PWSTII" ~ "PWS2",
+    TRUE ~ condition
+  )
+  
+  ubi_cols <- grep(paste0(ubi_prefix, ubi_condition_pattern), colnames(ubi_data), value = TRUE)
+  pro_cols <- if (condition == "WT") grep(pro_prefix_wt, colnames(pro_data), value = TRUE) else grep(paste0(pro_prefix_main, condition), colnames(pro_data), value = TRUE)
+  
+  if (length(ubi_cols) == 0 || length(pro_cols) == 0) return(NULL)
+  
+  # 2. Extract Data
+  ubi_vals <- sapply(ubi_data[common_genes, ubi_cols, drop = FALSE], as.numeric)
+  pro_vals <- sapply(pro_data[common_genes, pro_cols, drop = FALSE], as.numeric)
+  
+  ubi_mean <- rowMeans(ubi_vals, na.rm = TRUE)
+  pro_mean <- rowMeans(pro_vals, na.rm = TRUE)
+  
+  # 3. Auto-Detect Scale (Raw vs Log2) based on Max Value
+  is_raw_ubi <- max(ubi_mean, na.rm = TRUE) > 100
+  
+  ratio_df <- data.frame(gene = common_genes, ubi_mean, pro_mean) %>%
+    dplyr::filter(ubi_mean > 0, pro_mean > 0) # Remove zeros
+  
+  # 4. Calculate Log2 Ratio
+  if (is_raw_ubi) {
+    # Data is RAW -> Divide then Log
+    ratio_df$log2_ratio <- log2(ratio_df$ubi_mean / ratio_df$pro_mean)
+  } else {
+    # Data is LOG -> Subtract
+    ratio_df$log2_ratio <- ratio_df$ubi_mean - ratio_df$pro_mean
+  }
+  
+  ratio_df$condition <- condition
+  return(ratio_df)
+}
+
+# --- Step 5: Generate Data ---
+mgh_ratio_data <- lapply(condition_order, calculate_ratio_robust,
+                         ubi_data = abundance_ubi, pro_data = abundance_pro,
+                         ubi_prefix = "IP_M_", pro_prefix_main = "FP_MG_", pro_prefix_wt = "FP_M_WT") %>%
+  bind_rows() %>%
+  mutate(condition = factor(condition, levels = rev(condition_order)))
+
+h8330_ratio_data <- lapply(condition_order, calculate_ratio_robust,
+                           ubi_data = abundance_ubi, pro_data = abundance_pro,
+                           ubi_prefix = "IP_G_", pro_prefix_main = "FP_GM_", pro_prefix_wt = "FP_GM_WT") %>%
+  bind_rows() %>%
+  mutate(condition = factor(condition, levels = rev(condition_order)))
+
+
+# --- Step 6: Plotting with Fixes ---
+
+# FIX 1: Add padding to BOTH Bottom (0.2) and Top (0.5)
+ridge_expansion <- expansion(mult = c(0.2, 0.5))
+
+mgh_ridgeline_plot <- ggplot(mgh_ratio_data, aes(x = log2_ratio, y = condition, fill = condition, color = condition)) +
+  # FIX 2: Use 'linewidth' instead of 'size'
+  geom_density_ridges(alpha = 0.7, scale = 1.5, linewidth = 0.8) + 
+  geom_vline(xintercept = median(mgh_ratio_data$log2_ratio, na.rm = TRUE),
+             linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = genotype_colors) +
+  scale_color_manual(values = genotype_colors) +
+  scale_y_discrete(expand = ridge_expansion) +
+  labs(
+    title = "Distribution of Ubiquitome / Proteome Ratios (MGH)",
+    x = bquote(Log[2]~"(Ubiquitome / Proteome)")
+  ) +
+  # FIX 3: Widen the zoom slightly (0.001 to 0.999) to ensure tails aren't cut
+  coord_cartesian(xlim = quantile(mgh_ratio_data$log2_ratio, c(0.001, 0.999), na.rm = TRUE)) +
+  publication_theme
+
+h8330_ridgeline_plot <- ggplot(h8330_ratio_data, aes(x = log2_ratio, y = condition, fill = condition, color = condition)) +
+  # FIX 2: Use 'linewidth' instead of 'size'
+  geom_density_ridges(alpha = 0.7, scale = 1.5, linewidth = 0.8) + 
+  geom_vline(xintercept = median(h8330_ratio_data$log2_ratio, na.rm = TRUE),
+             linetype = "dashed", color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = genotype_colors) +
+  scale_color_manual(values = genotype_colors) +
+  scale_y_discrete(expand = ridge_expansion) +
+  labs(
+    title = "Distribution of Ubiquitome / Proteome Ratios (8330)",
+    x = bquote(Log[2]~"(Ubiquitome / Proteome)")
+  ) +
+  coord_cartesian(xlim = quantile(h8330_ratio_data$log2_ratio, c(0.001, 0.999), na.rm = TRUE)) +
+  publication_theme
+
+# --- Step 7: Display ---
+print(mgh_ridgeline_plot)
+print(h8330_ridgeline_plot)
+```
+
+
+
+Export results of ubiquitome-proteome ratio
+```{r}
+# Load library
+library(openxlsx)
+
+# ==============================================================================
+# EXPORT: UBIQUITOME-PROTEOME RATIOS (2 Sheets per Genotype)
+# ==============================================================================
+
+# 1. Prepare and Combine Data
+# Add Background column to distinguish them
+mgh_ratio_data$Background <- "MGH"
+h8330_ratio_data$Background <- "8330"
+
+# Combine and rename columns for professional output
+combined_data <- rbind(mgh_ratio_data, h8330_ratio_data) %>%
+  dplyr::select(
+    Gene = gene,
+    Background,
+    Genotype = condition,
+    Mean_Ubiquitome_Abundance = ubi_mean,
+    Mean_Proteome_Abundance = pro_mean,
+    Ubiquitome_Proteome_Log2_Ratio = log2_ratio
+  ) %>%
+  arrange(Background, Genotype, Gene)
+
+# 2. Initialize Workbook
+wb <- createWorkbook()
+header_style <- createStyle(textDecoration = "bold", halign = "center")
+
+# 3. Loop Logic: Create sheets for Genotype + Background
+unique_genotypes <- unique(combined_data$Genotype)
+unique_backgrounds <- c("MGH", "8330")
+
+for (geno in unique_genotypes) {
+  for (bg in unique_backgrounds) {
+    
+    # A. Filter data for this specific Genotype AND Background
+    sheet_data <- combined_data %>% 
+      filter(Genotype == geno, Background == bg) %>%
+      dplyr::select(-Genotype, -Background) # Remove redundant columns (in sheet name)
+    
+    # Check if data exists
+    if(nrow(sheet_data) > 0) {
+      
+      # B. Create Sheet Name (e.g., "DelC_MGH")
+      sheet_name <- paste0(geno, "_", bg)
+      sheet_name <- substr(sheet_name, 1, 31) # Max excel length
+      
+      addWorksheet(wb, sheet_name)
+      
+      # C. Write Data
+      writeData(wb, sheet = sheet_name, x = sheet_data)
+      
+      # D. Apply Formatting
+      addStyle(wb, sheet = sheet_name, style = header_style, rows = 1, cols = 1:ncol(sheet_data))
+      setColWidths(wb, sheet = sheet_name, cols = 1:ncol(sheet_data), widths = "auto")
+    }
+  }
+}
+
+# 4. Save
+saveWorkbook(wb, "Supplementary_Table_Ubi_Prot_Ratios.xlsx", overwrite = TRUE)
+
+cat("\nSuccess! 'Supplementary_Table_Ubi_Prot_Ratios.xlsx' created.")
+cat("\nContains sheets organized by Genotype_Background (e.g., 'DelC_MGH', 'PWSTI_8330').")
+```
+

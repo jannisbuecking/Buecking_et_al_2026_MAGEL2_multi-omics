@@ -1,0 +1,3099 @@
+---
+title: "Transcriptomics_vs_Proteomics"
+output: html_document
+date: "2025-08-26"
+---
+
+```{r}
+#RNA-seq
+dds_RNA <- readRDS(file = "./dds_RNA_30102024.rds")
+DEG_list_MGH <- readRDS(file = "./DEG_list_MGH_30102024.rds")
+DEG_list_8330 <- readRDS(file = "./DEG_list_8330_30102024.rds")
+
+
+#proteomics
+data_imp_MGH_new <- readRDS(file = "./data_imp_MGH_BH_new.rds")
+dep_MGH_results_new <- readRDS(file = "./dep_MGH_BH_new.rds")
+
+data_imp_8330_new <- readRDS(file = "./data_imp_8330_BH_new.rds")
+dep_8330_results_new <- readRDS(file = "./dep_8330_BH_new.rds")
+
+```
+
+
+Ridgeline Plot of proteomics / transcriptomics ratio 
+```{r}
+# Step 1: Load necessary libraries
+library(SummarizedExperiment)
+library(DESeq2)
+library(tidyverse)
+library(ggridges)
+
+# --- User-defined variables ---
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+condition_order <- c("DelC", "DupC", "HetDel", "HomoDel", "PWSTI", "PWSTII", "WT")
+genotype_colors <- gg_color_hue(length(condition_order))
+names(genotype_colors) <- condition_order
+
+# --- Step 2: Normalize RNA-seq data ---
+# Note: VST data is already log2-like and library size normalized
+vst_data <- vst(dds_RNA, blind = TRUE)
+vst_counts <- assay(vst_data)
+
+# --- Step 3: Create a Definitive Sample Mapping Table ---
+# We will create one map for each background.
+
+# --- MGH Mapping Table ---
+meta_prot_mgh <- as.data.frame(colData(data_imp_MGH_new)) %>%
+  rownames_to_column("Proteomics_ID")
+
+map_mgh <- meta_prot_mgh %>%
+  mutate(
+    # Handle the 'HetDel' vs 'HETDEL' inconsistency
+    condition_rna = ifelse(condition == "HetDel", "HETDEL", as.character(condition)),
+    # Reconstruct the RNA_ID
+    RNA_ID = paste0("MGH", condition_rna, replicate)
+  ) %>%
+  # Select only the mapping columns
+  dplyr::select(Proteomics_ID, RNA_ID, condition, replicate)
+
+# --- 8330 Mapping Table ---
+meta_prot_8330 <- as.data.frame(colData(data_imp_8330_new)) %>%
+  rownames_to_column("Proteomics_ID")
+
+map_8330 <- meta_prot_8330 %>%
+  mutate(
+    condition_rna = ifelse(condition == "HetDel", "HETDEL", as.character(condition)),
+    RNA_ID = paste0("8330", condition_rna, replicate)
+  ) %>%
+  dplyr::select(Proteomics_ID, RNA_ID, condition, replicate)
+
+
+# --- Step 4: Define a new, simpler function that uses the map ---
+
+prepare_ratio_data_mapped <- function(proteomics_se, vst_counts, sample_map, condition_order_vector) {
+  # A: Tidy Proteomics Data
+  protein_tidy <- assay(proteomics_se) %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(-Gene, names_to = "Proteomics_ID", values_to = "Protein_Abundance")
+
+  # B: Tidy RNA-seq Data
+  # Subset VST counts to only the samples in our map
+  rna_subset <- vst_counts[, colnames(vst_counts) %in% sample_map$RNA_ID, drop = FALSE]
+  rna_tidy <- rna_subset %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(-Gene, names_to = "RNA_ID", values_to = "RNA_Abundance")
+
+  # C: Merge using the map and Calculate Ratio
+  merged_data <- protein_tidy %>%
+    left_join(sample_map, by = "Proteomics_ID") %>%
+    left_join(rna_tidy, by = c("Gene", "RNA_ID")) %>%
+    dplyr::filter(!is.na(RNA_Abundance)) # Keep only matched data
+
+  ratio_data <- merged_data %>%
+    mutate(
+      Log2Ratio = Protein_Abundance - RNA_Abundance, 
+      condition = factor(condition, levels = rev(condition_order_vector))
+    )
+  return(ratio_data)
+}
+
+
+# --- Step 5: Generate data for each background using the new function and maps ---
+mgh_ratio_data <- prepare_ratio_data_mapped(data_imp_MGH_new, vst_counts, map_mgh, condition_order)
+h8330_ratio_data <- prepare_ratio_data_mapped(data_imp_8330_new, vst_counts, map_8330, condition_order)
+
+
+# --- Step 6: Create and Customize the Ridgeline Plots ---
+
+# Define a consistent theme for a cleaner, publication-ready look
+publication_theme <- theme_classic(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 10)),
+    axis.text.y = element_text(face = "bold"),
+    axis.title.y = element_blank(), # The y-axis labels are self-explanatory
+    legend.position = "none" # Hide legend as it's redundant with the y-axis
+  )
+
+# Plot for MGH background
+mgh_ridgeline_plot <- ggplot(mgh_ratio_data, aes(x = Log2Ratio, y = condition, fill = condition, color = condition)) +
+  geom_density_ridges(alpha = 0.7, scale = 1.2, size = 0.8) + # Outline color now mapped in aes()
+  geom_vline(xintercept = median(mgh_ratio_data$Log2Ratio, na.rm = TRUE),
+             linetype = "dashed", color = "black", size = 0.8) +
+  scale_fill_manual(values = genotype_colors) +
+  scale_color_manual(values = genotype_colors) + # Added scale for the outline color
+  labs(
+    title = "Distribution of Protein/RNA Ratios (MGH Background)",
+    x = bquote(Log[2]~"(Protein / RNA Abundance)")
+  ) +
+  # Use coord_cartesian to zoom in without dropping data points
+  coord_cartesian(xlim = quantile(mgh_ratio_data$Log2Ratio, c(0.005, 0.995), na.rm = TRUE)) +
+  publication_theme
+
+# Plot for 8330 background
+h8330_ridgeline_plot <- ggplot(h8330_ratio_data, aes(x = Log2Ratio, y = condition, fill = condition, color = condition)) +
+  geom_density_ridges(alpha = 0.7, scale = 1.2, size = 0.8) + # Outline color now mapped in aes()
+  geom_vline(xintercept = median(h8330_ratio_data$Log2Ratio, na.rm = TRUE),
+             linetype = "dashed", color = "black", size = 0.8) +
+  scale_fill_manual(values = genotype_colors) +
+  scale_color_manual(values = genotype_colors) + # Added scale for the outline color
+  labs(
+    title = "Distribution of Protein/RNA Ratios (8330 Background)",
+    x = bquote(Log[2]~"(Protein / RNA Abundance)")
+  ) +
+  coord_cartesian(xlim = quantile(h8330_ratio_data$Log2Ratio, c(0.005, 0.995), na.rm = TRUE)) +
+  publication_theme
+
+
+# --- Step 7: Display the plots ---
+print(mgh_ridgeline_plot)
+print(h8330_ridgeline_plot)
+```
+
+
+
+```{r}
+mgh_mean_ratios <- mgh_ratio_data %>%
+  dplyr::group_by(condition) %>%
+  dplyr::summarize(
+    mean_log2_ratio = mean(Log2Ratio, na.rm = TRUE),
+    sd_log2_ratio = sd(Log2Ratio, na.rm = TRUE)
+  )
+
+print(mgh_mean_ratios)
+
+h8330_mean_ratios <- h8330_ratio_data %>%
+  dplyr::group_by(condition) %>%
+  dplyr::summarize(
+    mean_log2_ratio = mean(Log2Ratio, na.rm = TRUE),
+    sd_log2_ratio = sd(Log2Ratio, na.rm = TRUE)
+  )
+
+print(h8330_mean_ratios)
+```
+
+Data Preparation
+```{r}
+# --- Step 1: Recreate the Master Integrated Data Table ---
+# This part is the same as before, ensuring the base data exists.
+library(tidyverse)
+library(SummarizedExperiment)
+
+comparison_map <- list(
+  "MGH_DelC_vs_WT"    = list(prot_lfc = "DelC_vs_WT_diff", prot_padj = "DelC_vs_WT_p.adj"),
+  "MGH_DupC_vs_WT"    = list(prot_lfc = "DupC_vs_WT_diff", prot_padj = "DupC_vs_WT_p.adj"),
+  "MGH_HetDel_vs_WT"  = list(prot_lfc = "HetDel_vs_WT_diff", prot_padj = "HetDel_vs_WT_p.adj"),
+  "MGH_HomoDel_vs_WT" = list(prot_lfc = "HomoDel_vs_WT_diff", prot_padj = "HomoDel_vs_WT_p.adj"),
+  "MGH_PWSTI_vs_WT"   = list(prot_lfc = "PWSTI_vs_WT_diff", prot_padj = "PWSTI_vs_WT_p.adj"),
+  "MGH_PWSTII_vs_WT"  = list(prot_lfc = "PWSTII_vs_WT_diff", prot_padj = "PWSTII_vs_WT_p.adj"),
+  "8330_DelC_vs_WT"    = list(prot_lfc = "DelC_vs_WT_diff", prot_padj = "DelC_vs_WT_p.adj"),
+  "8330_DupC_vs_WT"    = list(prot_lfc = "DupC_vs_WT_diff", prot_padj = "DupC_vs_WT_p.adj"),
+  "8330_HetDel_vs_WT"  = list(prot_lfc = "HetDel_vs_WT_diff", prot_padj = "HetDel_vs_WT_p.adj"),
+  "8330_HomoDel_vs_WT" = list(prot_lfc = "HomoDel_vs_WT_diff", prot_padj = "HomoDel_vs_WT_p.adj"),
+  "8330_PWSTI_vs_WT"   = list(prot_lfc = "PWSTI_vs_WT_diff", prot_padj = "PWSTI_vs_WT_p.adj"),
+  "8330_PWSTII_vs_WT"  = list(prot_lfc = "PWSTII_vs_WT_diff", prot_padj = "PWSTII_vs_WT_p.adj")
+)
+all_deg_lists <- list("MGH" = DEG_list_MGH, "8330" = DEG_list_8330)
+all_prot_results <- list("MGH" = dep_MGH_results_new, "8330" = dep_8330_results_new)
+integrated_list <- list()
+
+for (background in names(all_deg_lists)) {
+  deg_list <- all_deg_lists[[background]]
+  prot_results_df <- as.data.frame(rowData(all_prot_results[[background]]))
+  for (comp_short_name in names(deg_list)) {
+    rna_df <- as.data.frame(deg_list[[comp_short_name]]) %>%
+      rownames_to_column("Gene") %>%
+      dplyr::select(Gene, mRNA_Log2FC = log2FoldChange, mRNA_padj = padj)
+    comp_full_name <- paste0(background, "_", gsub("genotype_|_vs_WT", "", comp_short_name), "_vs_WT")
+    prot_lfc_col <- comparison_map[[comp_full_name]]$prot_lfc
+    prot_padj_col <- comparison_map[[comp_full_name]]$prot_padj
+    prot_df <- prot_results_df %>%
+      dplyr::select(Gene = PG.Genes, Protein_Log2FC = all_of(prot_lfc_col), Protein_padj = all_of(prot_padj_col))
+    integrated_df <- inner_join(rna_df, prot_df, by = "Gene") %>%
+      mutate(comparison = comp_full_name) %>%
+      na.omit()
+    integrated_list[[comp_full_name]] <- integrated_df
+  }
+}
+master_integrated_table <- bind_rows(integrated_list)
+
+
+# --- Step 2: Recreate the Quadrant Data Table ---
+# This is the crucial step that was missing.
+quadrant_data <- master_integrated_table %>%
+  mutate(
+    quadrant = case_when(
+      mRNA_Log2FC > 0 & Protein_Log2FC > 0   ~ "Up-Up (Correlated)",
+      mRNA_Log2FC < 0 & Protein_Log2FC < 0   ~ "Down-Down (Correlated)",
+      mRNA_Log2FC > 0 & Protein_Log2FC < 0   ~ "Up-Down (Post-transcriptional Down-regulation)",
+      mRNA_Log2FC < 0 & Protein_Log2FC > 0   ~ "Down-Up (Post-transcriptional Up-regulation)",
+      TRUE                                   ~ "No Change"
+    )
+  )
+
+# --- Step 3: Verify the result ---
+message("quadrant_data has been successfully recreated.")
+print(head(quadrant_data))
+```
+
+
+
+
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(stringr)
+
+# ==============================================================================
+# STEP 1: DEFINE THE "STRICT" UNIVERSE (Same as before)
+# ==============================================================================
+
+conditions <- c("DelC", "DupC", "HetDel", "HomoDel", "PWSTI", "PWSTII")
+backgrounds <- c("MGH", "8330")
+
+all_comparisons <- unlist(lapply(backgrounds, function(bg) {
+  paste0(bg, "_", conditions, "_vs_WT")
+}))
+
+# Initialize strict list
+first_comp <- all_comparisons[1]
+strict_common_genes <- master_integrated_table %>%
+  dplyr::filter(comparison == first_comp & !is.na(Protein_Log2FC) & !is.na(mRNA_Log2FC)) %>%
+  pull(Gene)
+
+# Intersect across all
+for(comp in all_comparisons[-1]) {
+  current_genes <- master_integrated_table %>%
+    dplyr::filter(comparison == comp & !is.na(Protein_Log2FC) & !is.na(mRNA_Log2FC)) %>%
+    pull(Gene)
+  strict_common_genes <- intersect(strict_common_genes, current_genes)
+}
+
+cat("\n--- Strict Universe Check ---\n")
+cat("Proteins detected in ALL 12 comparisons:", length(strict_common_genes), "\n\n")
+
+
+# ==============================================================================
+# STEP 2: SCATTER PLOT FUNCTION (Protein-Driven Discordance)
+# ==============================================================================
+
+create_rna_prot_scatter <- function(cond_name) {
+  
+  # Construct comparison strings
+  mgh_comp_string  <- paste0("MGH_", cond_name, "_vs_WT")
+  comp8330_string  <- paste0("8330_", cond_name, "_vs_WT")
+  
+  cat(paste("Processing:", cond_name, "\n"))
+
+  # --- A. Prepare MGH Data ---
+  df_mgh <- master_integrated_table %>%
+    dplyr::filter(comparison == mgh_comp_string) %>%
+    dplyr::filter(Gene %in% strict_common_genes) %>%
+    dplyr::select(Gene, mRNA_Log2FC, Protein_Log2FC, mRNA_padj, Protein_padj) %>%
+    rename(
+      MGH_RNA_FC = mRNA_Log2FC, 
+      MGH_Prot_FC = Protein_Log2FC,
+      MGH_RNA_padj = mRNA_padj,
+      MGH_Prot_padj = Protein_padj
+    )
+  
+  # --- B. Prepare 8330 Data ---
+  df_8330 <- master_integrated_table %>%
+    dplyr::filter(comparison == comp8330_string) %>%
+    dplyr::filter(Gene %in% strict_common_genes) %>%
+    dplyr::select(Gene, mRNA_Log2FC, Protein_Log2FC, mRNA_padj, Protein_padj) %>%
+    rename(
+      bg8330_RNA_FC = mRNA_Log2FC, 
+      bg8330_Prot_FC = Protein_Log2FC,
+      bg8330_RNA_padj = mRNA_padj,
+      bg8330_Prot_padj = Protein_padj
+    )
+  
+  # Check data existence
+  if(nrow(df_mgh) == 0 || nrow(df_8330) == 0) {
+    return(paste("ERROR: Missing data for", cond_name))
+  }
+
+  # --- C. Merge ---
+  merged_df <- inner_join(df_mgh, df_8330, by = "Gene")
+  cat(paste("  > Points to plot:", nrow(merged_df), "\n"))
+  
+  # --- D. Apply New "Protein-Only" Logic ---
+  
+  # Helper function for your specific logic
+  # Returns TRUE if Protein is driving the change (Prot Sig, RNA Not Sig in same direction)
+  is_protein_driven <- function(prot_padj, prot_fc, rna_padj, rna_fc) {
+    # Case 1: Protein Sig UP, RNA NOT Sig UP
+    prot_up <- (prot_padj < 0.05 & prot_fc > 0)
+    rna_up  <- (rna_padj < 0.05 & rna_fc > 0)
+    case1   <- prot_up & !rna_up
+    
+    # Case 2: Protein Sig DOWN, RNA NOT Sig DOWN
+    prot_down <- (prot_padj < 0.05 & prot_fc < 0)
+    rna_down  <- (rna_padj < 0.05 & rna_fc < 0)
+    case2     <- prot_down & !rna_down
+    
+    return(case1 | case2)
+  }
+
+  merged_df <- merged_df %>%
+    mutate(
+      # Apply logic to MGH
+      is_discordant_MGH = is_protein_driven(MGH_Prot_padj, MGH_Prot_FC, MGH_RNA_padj, MGH_RNA_FC),
+      
+      # Apply logic to 8330
+      is_discordant_8330 = is_protein_driven(bg8330_Prot_padj, bg8330_Prot_FC, bg8330_RNA_padj, bg8330_RNA_FC),
+      
+      # Check if Protein Direction is consistent between backgrounds
+      # (We only care if the protein change is consistent)
+      prot_dir_match = sign(MGH_Prot_FC) == sign(bg8330_Prot_FC),
+      
+      # Final Category: Must be discordant in BOTH backgrounds and protein direction must match
+      plot_category = case_when(
+        is_discordant_MGH & is_discordant_8330 & prot_dir_match ~ "Protein-Driven (Significant)",
+        TRUE ~ "Other"
+      )
+    )
+  
+  # --- E. Labeling ---
+  proteins_to_label <- c("NRAS","SLC2A1","SMAD4","NONO", "AKT2", "DYNC2H1", "PTPN11", "BRAF", "PAFAH1B1", "GRIA3", "NTRK2", "NDN")
+  merged_df$label <- ifelse(merged_df$Gene %in% proteins_to_label, merged_df$Gene, "")
+  
+  # --- F. Plotting ---
+  p <- ggplot(merged_df, aes(x = MGH_RNA_FC, y = MGH_Prot_FC, color = plot_category)) +
+    
+    # 1. Non-significant (Light Grey)
+    geom_point(data = subset(merged_df, plot_category == "Other"), 
+               color = "#ebebeb", size = 2, alpha = 0.8) +
+    
+    # 2. Significant (Dark Grey/Silver)
+    geom_point(data = subset(merged_df, plot_category == "Protein-Driven (Significant)"), 
+               color = "#c0c0c0", size = 2, alpha = 1) +
+    
+    # 3. Labeled points (Red)
+    geom_point(data = subset(merged_df, label != ""), 
+               color = "#b34747", size = 2) +
+    
+    # 4. Text Labels
+    geom_text_repel(aes(label = label), data = subset(merged_df, label != ""), 
+                    color = "#b34747", size = 3, 
+                    box.padding = 0.5, point.padding = 0.5, max.overlaps = 20) +
+    
+    # 5. Styling
+    labs(
+      title = paste0("MGH ", cond_name, ": Protein-Driven Discordance"),
+      subtitle = "Highlighting significant protein changes NOT driven by mRNA (Consistent in 8330)",
+      x = "mRNA Log2 Fold Change",
+      y = "Protein Log2 Fold Change",
+      color = ""
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    ) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    coord_cartesian(xlim = c(-7, 7), ylim = c(-5, 5))
+  
+  return(p)
+}
+
+# --- Execute for all conditions ---
+for (cond in conditions) {
+  print(create_rna_prot_scatter(cond))
+}
+```
+
+
+
+scatter plot v2
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(stringr)
+library(tidyverse)
+
+# ==============================================================================
+# STEP 1: STRICT FILTERING (The "Must be in Bucket 1/2 everywhere" Rule)
+# ==============================================================================
+
+# --- A. Define Bucket 1 (Protein UP / RNA Not UP) ---
+bucket1_all <- master_integrated_table %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC > 0,      # Prot Sig UP
+    !(mRNA_padj < 0.05 & mRNA_Log2FC > 0)          # RNA NOT Sig UP
+  )
+
+# Find genes present in ALL 12 Bucket 1 lists
+list_b1 <- bucket1_all %>% group_split(comparison) %>% lapply(function(df) df$Gene)
+if(length(list_b1) < 12) {
+  strict_up_genes <- character(0) 
+} else {
+  strict_up_genes <- Reduce(intersect, list_b1)
+}
+
+# --- B. Define Bucket 2 (Protein DOWN / RNA Not DOWN) ---
+bucket2_all <- master_integrated_table %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC < 0,      # Prot Sig DOWN
+    !(mRNA_padj < 0.05 & mRNA_Log2FC < 0)          # RNA NOT Sig DOWN
+  )
+
+# Find genes present in ALL 12 Bucket 2 lists
+list_b2 <- bucket2_all %>% group_split(comparison) %>% lapply(function(df) df$Gene)
+if(length(list_b2) < 12) {
+  strict_down_genes <- character(0)
+} else {
+  strict_down_genes <- Reduce(intersect, list_b2)
+}
+
+cat("\n--- Strict Selection Check ---\n")
+cat("Genes strictly discordant UP in all 12 conditions:", length(strict_up_genes), "\n")
+cat("Genes strictly discordant DOWN in all 12 conditions:", length(strict_down_genes), "\n")
+
+
+# ==============================================================================
+# STEP 2: RANK BY DIVERGENCE (Pick Top 5 from the Strict Lists)
+# ==============================================================================
+
+# Helper to calculate mean divergence for a specific gene list
+get_top_divergent <- function(gene_list, top_n, direction = "up") {
+  if(length(gene_list) == 0) return(character(0))
+  
+  ranked <- master_integrated_table %>%
+    dplyr::filter(Gene %in% gene_list) %>%
+    mutate(diff = Protein_Log2FC - mRNA_Log2FC) %>%
+    group_by(Gene) %>%
+    summarize(mean_diff = mean(diff, na.rm = TRUE))
+  
+  if(direction == "up") {
+    # Largest Positive Difference (Prot >> RNA)
+    return(head(arrange(ranked, desc(mean_diff)), top_n)$Gene)
+  } else {
+    # Largest Negative Difference (Prot << RNA)
+    return(head(arrange(ranked, mean_diff), top_n)$Gene)
+  }
+}
+
+# Get Top 5 Strict UP and Top 5 Strict DOWN
+final_top_5_up   <- get_top_divergent(strict_up_genes, 5, "up")
+final_top_5_down <- get_top_divergent(strict_down_genes, 5, "down")
+
+targets_global <- c(final_top_5_up, final_top_5_down)
+
+cat("\n--- Final Targets to Highlight ---\n")
+print(targets_global)
+
+
+# ==============================================================================
+# STEP 3: PLOTTING (With Halo Effect for Strict Targets)
+# ==============================================================================
+
+# We need the "Strict Universe" just for the background data filtering in the plot function
+# (This ensures the plot only shows genes detected in all experiments, consistent with previous plots)
+conditions <- c("DelC", "DupC", "HetDel", "HomoDel", "PWSTI", "PWSTII")
+backgrounds <- c("MGH", "8330")
+all_comparisons <- unlist(lapply(backgrounds, function(bg) paste0(bg, "_", conditions, "_vs_WT")))
+first_comp <- all_comparisons[1]
+base_strict_genes <- master_integrated_table %>% filter(comparison == first_comp) %>% pull(Gene)
+for(comp in all_comparisons[-1]) {
+  curr <- master_integrated_table %>% filter(comparison == comp) %>% pull(Gene)
+  base_strict_genes <- intersect(base_strict_genes, curr)
+}
+
+create_rna_prot_scatter <- function(cond_name) {
+  
+  mgh_comp_string  <- paste0("MGH_", cond_name, "_vs_WT")
+  comp8330_string  <- paste0("8330_", cond_name, "_vs_WT")
+  
+  # Prepare Data (Filtering for the base strict universe)
+  df_mgh <- master_integrated_table %>%
+    dplyr::filter(comparison == mgh_comp_string, Gene %in% base_strict_genes) %>%
+    dplyr::select(Gene, mRNA_Log2FC, Protein_Log2FC, mRNA_padj, Protein_padj) %>%
+    rename(MGH_RNA_FC=mRNA_Log2FC, MGH_Prot_FC=Protein_Log2FC, MGH_RNA_padj=mRNA_padj, MGH_Prot_padj=Protein_padj)
+  
+  df_8330 <- master_integrated_table %>%
+    dplyr::filter(comparison == comp8330_string, Gene %in% base_strict_genes) %>%
+    dplyr::select(Gene, mRNA_Log2FC, Protein_Log2FC, mRNA_padj, Protein_padj) %>%
+    rename(bg8330_RNA_FC=mRNA_Log2FC, bg8330_Prot_FC=Protein_Log2FC, bg8330_RNA_padj=mRNA_padj, bg8330_Prot_padj=Protein_padj)
+  
+  if(nrow(df_mgh) == 0 || nrow(df_8330) == 0) return(NULL)
+  
+  merged_df <- inner_join(df_mgh, df_8330, by = "Gene")
+  
+  # Logic: Red/Blue only if they meet the criteria locally (for the colors)
+  is_protein_driven <- function(prot_padj, prot_fc, rna_padj, rna_fc) {
+    prot_up <- (prot_padj < 0.05 & prot_fc > 0); rna_up <- (rna_padj < 0.05 & rna_fc > 0)
+    prot_down <- (prot_padj < 0.05 & prot_fc < 0); rna_down <- (rna_padj < 0.05 & rna_fc < 0)
+    return((prot_up & !rna_up) | (prot_down & !rna_down))
+  }
+
+  merged_df <- merged_df %>%
+    mutate(
+      is_discordant_MGH = is_protein_driven(MGH_Prot_padj, MGH_Prot_FC, MGH_RNA_padj, MGH_RNA_FC),
+      is_discordant_8330 = is_protein_driven(bg8330_Prot_padj, bg8330_Prot_FC, bg8330_RNA_padj, bg8330_RNA_FC),
+      prot_dir_match = sign(MGH_Prot_FC) == sign(bg8330_Prot_FC),
+      plot_category = case_when(
+        is_discordant_MGH & is_discordant_8330 & prot_dir_match & MGH_Prot_FC > 0 ~ "Protein-Driven Up",
+        is_discordant_MGH & is_discordant_8330 & prot_dir_match & MGH_Prot_FC < 0 ~ "Protein-Driven Down",
+        TRUE ~ "Other"
+      )
+    )
+  
+  # --- LABELING STRATEGY ---
+  # Only label if the gene is in our globally strict top 10 list
+  merged_df$label <- ifelse(merged_df$Gene %in% targets_global, merged_df$Gene, "")
+  
+  # Plot
+  p <- ggplot(merged_df, aes(x = MGH_RNA_FC, y = MGH_Prot_FC)) +
+    geom_point(data = subset(merged_df, plot_category == "Other"), color = "#ebebeb", size = 2, alpha = 0.8) +
+    geom_point(data = subset(merged_df, plot_category == "Protein-Driven Down"), color = "#0072B2", size = 2, alpha = 1) + 
+    geom_point(data = subset(merged_df, plot_category == "Protein-Driven Up"), color = "#b34747", size = 2, alpha = 1) + 
+    
+    # --- HALO HIGHLIGHT FOR TARGETS ---
+    # 1. Black Ring
+    geom_point(data = subset(merged_df, label != ""),
+               color = "black", size = 4, stroke = 1.2, shape = 21, fill = NA) + 
+    # 2. Colored Center
+    geom_point(data = subset(merged_df, label != ""),
+               aes(color = plot_category), size = 3) +
+    # 3. Labels
+    geom_text_repel(aes(label = label), data = subset(merged_df, label != ""), 
+                    color = "black", size = 4, fontface = "bold",
+                    min.segment.length = 0, box.padding = 0.8, max.overlaps = Inf) +
+    
+    scale_color_manual(values = c("Protein-Driven Up" = "#b34747", "Protein-Driven Down" = "#0072B2", "Other" = "#ebebeb")) +
+    labs(title = paste0("MGH ", cond_name), subtitle = "Highlighted: Top Divergent Genes (Strictly Consistent in All 12 Conditions)",
+         x = "mRNA Log2 Fold Change", y = "Protein Log2 Fold Change") +
+    theme_bw() +
+    theme(panel.grid = element_blank(), plot.title = element_text(face = "bold"), legend.position = "none") +
+    geom_vline(xintercept = 0, linetype = "dashed") + geom_hline(yintercept = 0, linetype = "dashed") +
+    coord_cartesian(xlim = c(-3.5, 3.5), ylim = c(-9, 9))
+  
+  return(p)
+}
+
+# --- Execute ---
+for (cond in conditions) {
+  print(create_rna_prot_scatter(cond))
+}
+```
+
+
+
+
+
+```{r}
+# Filter for Bucket 1 criteria
+bucket1_genes <- quadrant_data %>%
+  dplyr::filter(
+    # Protein is significantly UP
+    Protein_padj < 0.05 & Protein_Log2FC > 0,
+    # AND RNA is NOT significantly UP
+    !(mRNA_padj < 0.05 & mRNA_Log2FC > 0)
+  )
+
+# Split the single dataframe into a list of 12 dataframes (one for each comparison)
+bucket1_list <- bucket1_genes %>%
+  dplyr::group_split(comparison, .keep = TRUE) %>%
+  # Set the names of the list elements to be the comparison names
+  setNames(sapply(., function(df) unique(df$comparison)))
+
+# --- How to view the results ---
+
+# See the names of all 12 comparisons in your list
+print(names(bucket1_list))
+
+
+# Extract the list of gene names from each of the 12 dataframes in bucket1_list
+bucket1_gene_vectors <- lapply(bucket1_list, function(df) df$Gene)
+
+# Iteratively find the common genes across all 12 lists
+overlapping_bucket1_genes <- Reduce(intersect, bucket1_gene_vectors)
+
+# --- View the results ---
+print("Overlapping genes for Bucket 1:")
+print(overlapping_bucket1_genes)
+```
+
+
+
+```{r}
+# Filter for Bucket 2 criteria
+bucket2_genes <- quadrant_data %>%
+  dplyr::filter(
+    # Protein is significantly DOWN
+    Protein_padj < 0.05 & Protein_Log2FC < 0,
+    # AND RNA is NOT significantly DOWN
+    !(mRNA_padj < 0.05 & mRNA_Log2FC < 0)
+  )
+
+# Split into a list of 12 dataframes
+bucket2_list <- bucket2_genes %>%
+  dplyr::group_split(comparison, .keep = TRUE) %>%
+  setNames(sapply(., function(df) unique(df$comparison)))
+
+# --- How to view the results ---
+
+# See the names of all 12 comparisons
+print(names(bucket2_list))
+
+
+# Extract the list of gene names from each of the 12 dataframes in bucket2_list
+bucket2_gene_vectors <- lapply(bucket2_list, function(df) df$Gene)
+
+# Find the common genes across all 12 lists
+overlapping_bucket2_genes <- Reduce(intersect, bucket2_gene_vectors)
+
+# --- View the results ---
+print("Overlapping genes for Bucket 2:")
+print(overlapping_bucket2_genes)
+```
+
+
+Scatter Plot v2
+```{r}
+
+```
+
+
+
+
+Preparation for MotifmatchR - Bucket 1
+```{r}
+library(biomaRt)
+library(Biostrings)
+library(tidyverse)
+
+# --- Step 1: Prepare Gene Lists (Modified) ---
+
+# MODIFICATION 1: Use the overlapping genes for the foreground set
+# This assumes you have already run the code to create 'overlapping_bucket1_genes'
+foreground_genes <- overlapping_bucket1_genes
+
+# The background set remains the same: all genes identified in the experiment
+background_genes <- unique(master_integrated_table$Gene)
+
+print(paste("Foreground set now contains", length(foreground_genes), "overlapping genes."))
+print(paste("Background set contains", length(background_genes), "genes."))
+
+
+# --- Step 2: Retrieve 3' UTR Sequences using biomaRt ---
+
+# Connect to the Ensembl database for human genes
+ensembl_mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Fetch sequences for the foreground gene set
+foreground_seqs <- getSequence(
+  id = foreground_genes,
+  type = "hgnc_symbol",
+  seqType = "3utr",
+  mart = ensembl_mart
+)
+
+# Fetch sequences for the background gene set
+background_seqs <- getSequence(
+  id = background_genes,
+  type = "hgnc_symbol",
+  seqType = "3utr",
+  mart = ensembl_mart
+)
+
+
+# --- Step 3: Write Sequences to FASTA Files (Modified with Error Fix) ---
+
+# This function is now more robust and will filter out invalid sequences
+write_fasta_from_biomart <- function(seq_df, filename) {
+  seq_df_clean <- seq_df %>%
+    # Remove entries without a sequence
+    filter(nchar(`3utr`) > 0) %>%
+    # MODIFICATION 2 (ERROR FIX): Filter for valid DNA sequences only (A,C,G,T,N)
+    # The regex "^[ACGTN]+$" ensures the sequence only contains DNA characters
+    filter(grepl("^[ACGTN]+$", `3utr`, ignore.case = TRUE)) %>%
+    # Keep only the first unique entry for each gene symbol
+    distinct(hgnc_symbol, .keep_all = TRUE)
+
+  if (nrow(seq_df_clean) > 0) {
+    # Create a DNAStringSet object
+    dna_string_set <- DNAStringSet(seq_df_clean$`3utr`)
+    names(dna_string_set) <- seq_df_clean$hgnc_symbol
+
+    # Write to file
+    writeXStringSet(dna_string_set, filename)
+    print(paste("Wrote", length(dna_string_set), "sequences to", filename))
+  } else {
+    print(paste("Warning: No valid sequences found to write to", filename))
+  }
+}
+
+# Write the FASTA files to your working directory
+write_fasta_from_biomart(foreground_seqs, "foreground_genes_overlapping_3utr.fasta")
+write_fasta_from_biomart(background_seqs, "background_genes_3utr.fasta")
+```
+
+```{r}
+library(biomaRt)
+library(Biostrings)
+library(tidyverse)
+
+# --- Step 1: Prepare Gene Lists (Modified) ---
+
+# MODIFICATION 1: Use the overlapping genes for the foreground set
+# This assumes you have already run the code to create 'overlapping_bucket1_genes'
+foreground_genes <- overlapping_bucket2_genes
+
+# The background set remains the same: all genes identified in the experiment
+background_genes <- unique(master_integrated_table$Gene)
+
+print(paste("Foreground set now contains", length(foreground_genes), "overlapping genes."))
+print(paste("Background set contains", length(background_genes), "genes."))
+
+
+# --- Step 2: Retrieve 3' UTR Sequences using biomaRt ---
+
+# Connect to the Ensembl database for human genes
+ensembl_mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Fetch sequences for the foreground gene set
+foreground_seqs <- getSequence(
+  id = foreground_genes,
+  type = "hgnc_symbol",
+  seqType = "3utr",
+  mart = ensembl_mart
+)
+
+# Fetch sequences for the background gene set
+background_seqs <- getSequence(
+  id = background_genes,
+  type = "hgnc_symbol",
+  seqType = "3utr",
+  mart = ensembl_mart
+)
+
+
+# --- Step 3: Write Sequences to FASTA Files (Modified with Error Fix) ---
+
+# This function is now more robust and will filter out invalid sequences
+write_fasta_from_biomart <- function(seq_df, filename) {
+  seq_df_clean <- seq_df %>%
+    # Remove entries without a sequence
+    filter(nchar(`3utr`) > 0) %>%
+    # MODIFICATION 2 (ERROR FIX): Filter for valid DNA sequences only (A,C,G,T,N)
+    # The regex "^[ACGTN]+$" ensures the sequence only contains DNA characters
+    filter(grepl("^[ACGTN]+$", `3utr`, ignore.case = TRUE)) %>%
+    # Keep only the first unique entry for each gene symbol
+    distinct(hgnc_symbol, .keep_all = TRUE)
+
+  if (nrow(seq_df_clean) > 0) {
+    # Create a DNAStringSet object
+    dna_string_set <- DNAStringSet(seq_df_clean$`3utr`)
+    names(dna_string_set) <- seq_df_clean$hgnc_symbol
+
+    # Write to file
+    writeXStringSet(dna_string_set, filename)
+    print(paste("Wrote", length(dna_string_set), "sequences to", filename))
+  } else {
+    print(paste("Warning: No valid sequences found to write to", filename))
+  }
+}
+
+# Write the FASTA files to your working directory
+write_fasta_from_biomart(foreground_seqs, "2foreground_genes_overlapping_3utr.fasta")
+write_fasta_from_biomart(background_seqs, "2background_genes_3utr.fasta")
+```
+
+
+
+MotifMatchR Foreground Bucket 1
+```{r}
+# --- Step 1: Recreate the Quadrant Data ---
+# This step is needed to get the classification and p-values.
+quadrant_data <- master_integrated_table %>%
+  mutate(
+    quadrant = case_when(
+      mRNA_Log2FC > 0 & Protein_Log2FC > 0   ~ "Up-Up (Correlated)",
+      mRNA_Log2FC < 0 & Protein_Log2FC < 0   ~ "Down-Down (Correlated)",
+      mRNA_Log2FC > 0 & Protein_Log2FC < 0   ~ "Up-Down (Post-transcriptional Down-regulation)",
+      mRNA_Log2FC < 0 & Protein_Log2FC > 0   ~ "Down-Up (Post-transcriptional Up-regulation)",
+      TRUE                                   ~ "No Change"
+    )
+  )
+
+# --- Step 2: Recreate Bucket 1 ---
+# Filter for genes significantly UP in protein but NOT significantly UP in mRNA.
+bucket1_genes <- quadrant_data %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC > 0,
+    !(mRNA_padj < 0.05 & mRNA_Log2FC > 0)
+  )
+
+# Split into a list of dataframes, one for each condition.
+bucket1_list <- bucket1_genes %>%
+  dplyr::group_split(comparison, .keep = TRUE) %>%
+  setNames(sapply(., function(df) unique(df$comparison)))
+
+# --- Step 3: Find Overlapping Genes ---
+# Extract the gene names from each of the 12 dataframes.
+bucket1_gene_vectors <- lapply(bucket1_list, function(df) df$Gene)
+
+# Find the intersection of all 12 gene lists.
+overlapping_bucket1_genes <- Reduce(intersect, bucket1_gene_vectors)
+
+# --- Step 4: Recreate the final foreground_genes list ---
+foreground_genes_bucket1 <- overlapping_bucket1_genes
+
+# --- Step 5: Verify the result ---
+print("foreground_genes list has been recreated:")
+print(paste("Number of overlapping genes:", length(foreground_genes_bucket1)))
+print(head(foreground_genes_bucket1))
+```
+
+
+MotifMatchR Foreground Bucket 2
+```{r}
+# --- Step 1: Recreate Bucket 2 ---
+# Filter for genes significantly DOWN in protein but NOT significantly DOWN in mRNA.
+bucket2_genes <- quadrant_data %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC < 0,
+    !(mRNA_padj < 0.05 & mRNA_Log2FC < 0)
+  )
+
+# Split into a list of dataframes, one for each condition.
+bucket2_list <- bucket2_genes %>%
+  dplyr::group_split(comparison, .keep = TRUE) %>%
+  setNames(sapply(., function(df) unique(df$comparison)))
+
+# --- Step 2: Find Overlapping Genes ---
+# Extract the gene names from each of the 12 dataframes.
+bucket2_gene_vectors <- lapply(bucket2_list, function(df) df$Gene)
+
+# Find the intersection of all 12 gene lists.
+overlapping_bucket2_genes <- Reduce(intersect, bucket2_gene_vectors)
+
+# --- Step 3: Create the final foreground_genes list for Bucket 2 ---
+foreground_genes_bucket2 <- overlapping_bucket2_genes
+
+# --- Step 4: Verify the result ---
+print("foreground_genes list for Bucket 2 has been recreated:")
+print(paste("Number of overlapping genes:", length(foreground_genes_bucket2)))
+print(head(foreground_genes_bucket2))
+```
+
+
+MotifMatchR Filtering for RNA-binding proteins
+```{r}
+# --- Step 1: Load Libraries ---
+library(MotifDb)
+library(dplyr)
+library(tibble)
+library(data.table)
+
+# --- Step 2: Read RBP Data and Filter by Score ---
+file_path <- "Table_HS_RBP.txt" # Assumes the RBP2GO file is in your directory
+rbp_data <- data.table::fread(file_path)
+
+# --- SET YOUR CONFIDENCE THRESHOLD HERE ---
+score_cutoff <- 10
+
+# Filter for high-confidence RBPs using the RBP2GO_Score
+high_confidence_rbps <- rbp_data %>%
+  dplyr::filter(RBP2GO_Score >= score_cutoff) %>%
+  dplyr::pull(Gene_Name) %>%
+  unique()
+
+message(paste("Filtered to", length(high_confidence_rbps), "high-confidence RBPs with a score >=", score_cutoff))
+
+
+# --- Step 3: Filter MotifDb with the High-Confidence List ---
+
+# Get the full metadata from your MotifDb installation
+all_metadata <- as.data.frame(values(MotifDb)) %>%
+  tibble::rownames_to_column(var = "motif")
+
+# Filter the metadata to find rows where the geneSymbol is in our new high-confidence list
+rbp_metadata_subset <- all_metadata %>%
+  dplyr::filter(geneSymbol %in% high_confidence_rbps & organism == "Hsapiens")
+
+# Get the unique names of the motifs that passed the filter
+rbp_motif_names <- rbp_metadata_subset %>%
+  dplyr::pull(motif) %>%
+  unique()
+
+
+# --- Step 4: Create the New High-Confidence RBP-only MotifDb Object ---
+
+# Subset the main MotifDb object using our filtered list of motif names
+rbp_only_motifs <- MotifDb[rbp_motif_names]
+
+
+# --- Step 5: Verify the Result ---
+message(paste("Successfully created a new database with", length(rbp_only_motifs), "motifs for the high-confidence RBPs."))
+print(rbp_only_motifs)
+length(rbp_only_motifs)
+```
+
+MotifMatchR enrichment for Bucket 1
+```{r}
+# --- Step 1: Load Libraries ---
+library(motifmatchr)
+library(MotifDb)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(TFBSTools)
+library(SummarizedExperiment)
+library(data.table)
+library(tidyverse)
+
+# --- Step 3: Prepare Sequences and Gene Lists ---
+message("Fetching 3' UTRs and mapping to gene symbols...")
+utrs <- threeUTRsByTranscript(TxDb.Hsapiens.UCSC.hg38.knownGene, use.names = TRUE)
+tx_names <- names(utrs)
+
+tx2geneid <- AnnotationDbi::select(
+  TxDb.Hsapiens.UCSC.hg38.knownGene, keys = tx_names,
+  keytype = "TXNAME", columns = "GENEID"
+)
+geneid2symbol <- AnnotationDbi::select(
+  org.Hs.eg.db, keys = unique(tx2geneid$GENEID),
+  keytype = "ENTREZID", columns = "SYMBOL"
+)
+tx2symbol <- dplyr::left_join(tx2geneid, geneid2symbol, by = c("GENEID" = "ENTREZID")) %>%
+  dplyr::filter(!is.na(SYMBOL) & !is.na(TXNAME))
+
+foreground_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% foreground_genes_bucket1) %>%
+  dplyr::pull(TXNAME) %>% unique()
+
+background_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% background_genes) %>%
+  dplyr::pull(TXNAME) %>% unique()
+
+if (length(foreground_tx_names) == 0) {
+  stop("Error: None of the foreground gene symbols could be mapped to a transcript.")
+}
+message("Extracting genomic sequences...")
+utrs_foreground <- utrs[names(utrs) %in% foreground_tx_names]
+utrs_background <- utrs[names(utrs) %in% background_tx_names]
+seqs_foreground <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_foreground)
+seqs_background <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_background)
+
+
+# --- Step 4: Create and Prepare the HIGH-CONFIDENCE RBP-only Motif Database ---
+message("Creating a focused database of high-confidence RBP-only motifs...")
+
+# Define the path to your RBP2GO data file
+file_path <- "Table_HS_RBP.txt" # Make sure this file is in your directory
+rbp_data <- data.table::fread(file_path, skip = 5)
+
+# --- SET YOUR CONFIDENCE THRESHOLD HERE ---
+score_cutoff <- 10
+
+# **NEW:** Filter for high-confidence RBPs using the RBP2GO_Score
+high_confidence_rbp_genes <- rbp_data %>%
+  dplyr::filter(RBP2GO_Score >= score_cutoff) %>%
+  dplyr::pull(Gene_Name) %>%
+  unique()
+
+message(paste("Filtered to", length(high_confidence_rbp_genes), "high-confidence RBPs with a score >=", score_cutoff))
+
+# Get the full metadata from your MotifDb installation
+all_metadata <- as.data.frame(values(MotifDb)) %>%
+  tibble::rownames_to_column(var = "motif")
+
+# **UPDATED:** Filter the metadata using the new high_confidence_rbp_genes list
+rbp_metadata_subset <- all_metadata %>%
+  dplyr::filter(geneSymbol %in% high_confidence_rbp_genes & organism == "Hsapiens")
+
+# Get the unique names of the motifs that passed the filter
+rbp_motif_names <- rbp_metadata_subset %>%
+  dplyr::pull(motif) %>%
+  unique()
+
+# Subset the main MotifDb object using our filtered list of motif names
+rbp_only_motifs <- MotifDb[rbp_motif_names]
+
+message("Preparing high-confidence RBP motifs for matching...")
+motif_list_raw <- as.list(rbp_only_motifs)
+pfm_object_list <- mapply(
+    function(matrix, name) { TFBSTools::PFMatrix(ID = name, name = name, profileMatrix = matrix) },
+    motif_list_raw, names(motif_list_raw), SIMPLIFY = FALSE
+)
+rbp_motifs_final <- do.call(PFMatrixList, pfm_object_list)
+message(paste("Successfully prepared", length(rbp_motifs_final), "high-confidence RBP motifs for analysis."))
+
+
+# --- Step 5: Find Motif Matches ---
+message("Scanning sequences for motif matches...")
+seqs_foreground_flat <- unlist(seqs_foreground)
+seqs_background_flat <- unlist(seqs_background)
+
+motif_results_foreground <- motifmatchr::matchMotifs(rbp_motifs_final, seqs_foreground_flat, out = "scores")
+motif_results_background <- motifmatchr::matchMotifs(rbp_motifs_final, seqs_background_flat, out = "scores")
+
+motif_hits_foreground <- motifCounts(motif_results_foreground)
+motif_hits_background <- motifCounts(motif_results_background)
+
+
+# --- Step 6: Perform Enrichment Analysis for Bucket 1 ---
+message("Performing Fisher's exact test for enrichment...")
+final_results_bucket1 <- tibble() 
+
+if (nrow(motif_hits_foreground) > 0) {
+    foreground_hits <- colSums(motif_hits_foreground > 0)
+    background_hits <- colSums(motif_hits_background > 0)
+    
+    num_foreground_seqs <- nrow(motif_hits_foreground)
+    num_background_seqs <- nrow(motif_hits_background)
+
+    fisher_results <- lapply(1:length(rbp_motifs_final), function(i) {
+        tbl <- matrix(c(
+            foreground_hits[i],
+            background_hits[i],
+            num_foreground_seqs - foreground_hits[i],
+            num_background_seqs - background_hits[i]
+        ), nrow = 2)
+        
+        fisher.test(tbl, alternative = "greater")
+    })
+
+    final_results_bucket1 <- tibble(
+        motif = names(rbp_motifs_final),
+        p_value = sapply(fisher_results, "[[", "p.value"),
+        odds_ratio = sapply(fisher_results, function(x) x$estimate)
+    ) %>%
+    dplyr::mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    dplyr::arrange(p_adj)
+} else {
+    warning("No foreground sequences remained after mapping and filtering.")
+}
+
+print("Top 20 enriched RBP motifs for Bucket 1:")
+print(head(final_results_bucket1, 20))
+
+
+# --- Step 7: Visualize the Results for Bucket 1 ---
+
+if (nrow(final_results_bucket1) > 0) {
+  message("Generating final results dot plot for Bucket 1...")
+  
+  top_motifs_plot_bucket1 <- final_results_bucket1 %>%
+    # Data preparation steps
+    dplyr::filter(is.finite(odds_ratio) & p_adj < 0.05) %>%
+    dplyr::top_n(15, -p_adj) %>%
+    dplyr::mutate(
+      log10_padj = -log10(p_adj),
+      # --- CHANGE HERE ---
+      # The y-axis (motif) is now sorted by odds_ratio
+      motif = fct_reorder(motif, odds_ratio) 
+    ) %>%
+    
+    # ggplot call remains the same
+    ggplot(aes(x = odds_ratio, y = motif, size = odds_ratio, color = log10_padj)) +
+    geom_point(alpha = 0.8) +
+    
+    # Scales remain the same
+    scale_color_gradient(low = "lightblue", high = "firebrick") +
+    scale_size_continuous(range = c(4, 10), breaks = c(3, 3.5, 4, 4.5)) +
+    
+    # Labs remain the same
+    labs(
+      title = "Top 15 Enriched RBP Motifs in Foreground Genes (Bucket 1)",
+      x = "Odds Ratio",
+      y = "RBP Motif",
+      size = "Odds Ratio",
+      color = bquote(-Log[10]~"(p-adj)")
+    ) +
+    
+    # Theme remains the same
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(top_motifs_plot_bucket1)
+  
+} else {
+  message("No significant motifs found to plot for Bucket 1.")
+}
+
+# --- Step 8: Link Significant Motifs to RBP Gene Symbols for Bucket 1 ---
+message("--- Linking enriched motifs to their corresponding RBPs for Bucket 1 ---")
+significant_motifs_bucket1 <- final_results_bucket1 %>%
+  dplyr::filter(p_adj < 0.05) %>%
+  dplyr::pull(motif)
+
+if (length(significant_motifs_bucket1) > 0) {
+    rbp_identities_bucket1 <- as.data.frame(values(MotifDb)) %>%
+      tibble::rownames_to_column(var = "motif") %>%
+      dplyr::filter(motif %in% significant_motifs_bucket1) %>%
+      dplyr::select(motif, geneSymbol, proteinId, dataSource) %>%
+      dplyr::arrange(match(motif, significant_motifs_bucket1))
+
+    print(head(rbp_identities_bucket1, 20))
+} else {
+    message("No significantly enriched motifs to report for Bucket 1.")
+}
+
+# --- Step 9: Create and Print Final Summary Table for Bucket 1 ---
+# Make sure the knitr package is installed: install.packages("knitr")
+library(knitr)
+
+message("--- Final Summary of Enriched RBP Motifs (p_adj < 0.05) ---")
+
+if (exists("rbp_identities_bucket1") && nrow(rbp_identities_bucket1) > 0) {
+  
+  # Join the statistical results with the RBP identities
+  summary_table_bucket1 <- dplyr::left_join(
+    final_results_bucket1, 
+    rbp_identities_bucket1, 
+    by = "motif"
+  ) %>%
+  # Filter for significant results
+  dplyr::filter(p_adj < 0.05) %>%
+  # Select and order the most important columns
+  dplyr::select(motif, geneSymbol, odds_ratio, p_value, p_adj) %>%
+  # Arrange by significance
+  dplyr::arrange(p_adj)
+
+  # Print the final results in a clean table format
+  if(nrow(summary_table_bucket1) > 0){
+    print(knitr::kable(summary_table_bucket1, digits = 3, caption = "Enriched RBP Motifs (Bucket 1)"))
+  } else {
+    message("No motifs passed the significance threshold of p_adj < 0.05.")
+  }
+  
+} else {
+  message("No significantly enriched motifs were found to create a summary table.")
+}
+
+# --- Step 10: Overlap Enriched Motifs with a Specific Protein List ---
+
+message("--- Overlapping Enriched Motifs with Your Protein List ---")
+
+# First, make sure the summary table from Step 9 exists and has results
+if (exists("summary_table_bucket1") && nrow(summary_table_bucket1) > 0) {
+  
+  # Filter the summary table to find rows where the geneSymbol is in your protein_list
+  overlapping_results <- summary_table_bucket1 %>%
+    dplyr::filter(geneSymbol %in% protein_list)
+  
+  # Print the results of the overlap
+  if(nrow(overlapping_results) > 0){
+    print(knitr::kable(
+      overlapping_results, 
+      digits = 3, 
+      caption = "Enriched Motifs Overlapping with Your Protein List"
+    ))
+  } else {
+    message("No overlap found between the significantly enriched motifs and your protein list.")
+  }
+  
+} else {
+  message("No significant motifs were found in Step 9 to overlap with.")
+}
+
+
+# --- Step 11: Create a Summarized Dot Plot (Unique RBPs) ---
+message("--- Generating a summarized plot with unique RBPs for Bucket 2 ---")
+
+# First, make sure the final results and identities tables exist and are not empty
+if (exists("final_results_bucket1") && exists("rbp_identities_bucket2") && nrow(final_results_bucket1) > 0) {
+
+  # 1. Join the statistical results with the RBP gene symbol identities
+  enriched_rbps_all <- dplyr::left_join(
+    final_results_bucket1,
+    rbp_identities_bucket1,
+    by = "motif"
+  ) %>%
+  # Filter for significant results and remove any RBPs that couldn't be mapped to a gene symbol
+  dplyr::filter(p_adj < 0.05 & !is.na(geneSymbol) & is.finite(odds_ratio))
+
+  # 2. For each RBP (geneSymbol), find its single best result (lowest p-value)
+  enriched_rbps_unique <- enriched_rbps_all %>%
+    dplyr::group_by(geneSymbol) %>%
+    # slice_min() keeps the row with the minimum p_adj for each geneSymbol group
+    dplyr::slice_min(order_by = p_adj, n = 1, with_ties = FALSE) %>%
+    ungroup() # Ungroup for further operations
+
+  # 3. Create the dot plot using this summarized data
+  if(nrow(enriched_rbps_unique) > 0) {
+    summarized_dot_plot <- enriched_rbps_unique %>%
+      dplyr::top_n(15, -p_adj) %>%
+      dplyr::mutate(
+        log10_padj = -log10(p_adj),
+        # Reorder the y-axis by the odds ratio for better visualization
+        geneSymbol = fct_reorder(geneSymbol, odds_ratio)
+      ) %>%
+      ggplot(aes(x = odds_ratio, y = geneSymbol, size = odds_ratio, color = log10_padj)) +
+      geom_point(alpha = 0.8) +
+      scale_color_gradient(low = "lightblue", high = "firebrick") +
+      scale_size_continuous(range = c(4, 10)) + # Adjust range as needed
+      labs(
+        title = "Top 15 Enriched RBPs (Unique) in Foreground Genes (Bucket 1)",
+        x = "Odds Ratio",
+        y = "RBP (Gene Symbol)",
+        size = "Odds Ratio",
+        color = bquote(-Log[10]~"(p-adj)")
+      ) +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+
+    print(summarized_dot_plot)
+
+  } else {
+    message("No significant motifs remained after summarizing by gene symbol for Bucket 2.")
+  }
+
+} else {
+  message("No significant motifs found in the previous step to create a summarized plot for Bucket 2.")
+}
+```
+
+
+MotifMatchR enrichment for Bucket 2
+```{r}
+# --- Step 1: Load Libraries ---
+library(motifmatchr)
+library(MotifDb)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(TFBSTools)
+library(SummarizedExperiment)
+library(data.table)
+library(knitr)
+library(tidyverse)
+
+
+# --- Step 3: Prepare Sequences and Gene Lists ---
+message("Fetching 3' UTRs and mapping to gene symbols...")
+utrs <- threeUTRsByTranscript(TxDb.Hsapiens.UCSC.hg38.knownGene, use.names = TRUE)
+tx_names <- names(utrs)
+
+tx2geneid <- AnnotationDbi::select(
+  TxDb.Hsapiens.UCSC.hg38.knownGene, keys = tx_names,
+  keytype = "TXNAME", columns = "GENEID"
+)
+geneid2symbol <- AnnotationDbi::select(
+  org.Hs.eg.db, keys = unique(tx2geneid$GENEID),
+  keytype = "ENTREZID", columns = "SYMBOL"
+)
+tx2symbol <- dplyr::left_join(tx2geneid, geneid2symbol, by = c("GENEID" = "ENTREZID")) %>%
+  dplyr::filter(!is.na(SYMBOL) & !is.na(TXNAME))
+
+foreground_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% foreground_genes_bucket2) %>%
+  dplyr::pull(TXNAME) %>% unique()
+
+background_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% background_genes) %>%
+  dplyr::pull(TXNAME) %>% unique()
+
+if (length(foreground_tx_names) == 0) {
+  stop("Error: None of the foreground gene symbols could be mapped to a transcript.")
+}
+message("Extracting genomic sequences...")
+utrs_foreground <- utrs[names(utrs) %in% foreground_tx_names]
+utrs_background <- utrs[names(utrs) %in% background_tx_names]
+seqs_foreground <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_foreground)
+seqs_background <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_background)
+
+
+
+# --- Step 5: Find Motif Matches ---
+message("Scanning sequences for motif matches...")
+seqs_foreground_flat <- unlist(seqs_foreground)
+seqs_background_flat <- unlist(seqs_background)
+
+motif_results_foreground <- motifmatchr::matchMotifs(rbp_motifs_final, seqs_foreground_flat, out = "scores")
+motif_results_background <- motifmatchr::matchMotifs(rbp_motifs_final, seqs_background_flat, out = "scores")
+
+motif_hits_foreground <- motifCounts(motif_results_foreground)
+motif_hits_background <- motifCounts(motif_results_background)
+
+
+# --- Step 6: Perform Enrichment Analysis for Bucket 2 ---
+message("Performing Fisher's exact test for enrichment...")
+final_results_bucket2 <- tibble() 
+
+if (nrow(motif_hits_foreground) > 0) {
+    foreground_hits <- colSums(motif_hits_foreground > 0)
+    background_hits <- colSums(motif_hits_background > 0)
+    
+    num_foreground_seqs <- nrow(motif_hits_foreground)
+    num_background_seqs <- nrow(motif_hits_background)
+
+    fisher_results <- lapply(1:length(rbp_motifs_final), function(i) {
+        tbl <- matrix(c(
+            foreground_hits[i],
+            background_hits[i],
+            num_foreground_seqs - foreground_hits[i],
+            num_background_seqs - background_hits[i]
+        ), nrow = 2)
+        
+        fisher.test(tbl, alternative = "greater")
+    })
+
+    final_results_bucket2 <- tibble(
+        motif = names(rbp_motifs_final),
+        p_value = sapply(fisher_results, "[[", "p.value"),
+        odds_ratio = sapply(fisher_results, function(x) x$estimate)
+    ) %>%
+    dplyr::mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    dplyr::arrange(p_adj)
+} else {
+    warning("No foreground sequences remained after mapping and filtering.")
+}
+
+print("Top 20 enriched RBP motifs for Bucket 2:")
+print(head(final_results_bucket2, 20))
+
+
+# --- Step 7: Visualize the Results for Bucket 2 ---
+# Load necessary libraries if you haven't already
+# library(ggplot2)
+# library(dplyr)
+# library(forcats)
+
+if (nrow(final_results_bucket2) > 0) {
+  message("Generating updated results dot plot for Bucket 2...")
+  
+  top_motifs_plot_bucket2 <- final_results_bucket2 %>%
+    # Data preparation steps
+    dplyr::filter(is.finite(odds_ratio) & p_adj < 0.05) %>%
+    dplyr::top_n(15, -p_adj) %>%
+    dplyr::mutate(
+      log10_padj = -log10(p_adj),
+      # Sort the y-axis (motif) by the odds_ratio
+      motif = fct_reorder(motif, odds_ratio) 
+    ) %>%
+    
+    # ggplot call with updated aesthetics
+    ggplot(aes(x = odds_ratio, y = motif, size = odds_ratio, color = log10_padj)) +
+    geom_point(alpha = 0.8) +
+    
+    # Set the color gradient for significance
+    scale_color_gradient(low = "lightblue", high = "firebrick") +
+    
+    # Set the size range and legend breaks
+    # NOTE: You may need to adjust the numbers in `breaks` to fit Bucket 2's data
+    scale_size_continuous(range = c(4, 10), breaks = c(3, 3.5, 4, 4.5)) +
+    
+    # Update labels for the new axes and legends
+    labs(
+      title = "Top 15 Enriched RBP Motifs in Foreground Genes (Bucket 2)",
+      x = "Odds Ratio",
+      y = "RBP Motif",
+      size = "Odds Ratio",
+      color = bquote(-Log[10]~"(p-adj)")
+    ) +
+    
+    # Apply a minimal theme and remove gridlines
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(top_motifs_plot_bucket2)
+  
+} else {
+  message("No significant motifs found to plot for Bucket 2.")
+}
+
+# --- Step 8: Link Significant Motifs to RBP Gene Symbols for Bucket 2 ---
+message("--- Linking enriched motifs to their corresponding RBPs for Bucket 2 ---")
+significant_motifs_bucket2 <- final_results_bucket2 %>%
+  dplyr::filter(p_adj < 0.05) %>%
+  dplyr::pull(motif)
+
+if (length(significant_motifs_bucket2) > 0) {
+    rbp_identities_bucket2 <- as.data.frame(values(MotifDb)) %>%
+      tibble::rownames_to_column(var = "motif") %>%
+      dplyr::filter(motif %in% significant_motifs_bucket2) %>%
+      dplyr::select(motif, geneSymbol, proteinId, dataSource) %>%
+      dplyr::arrange(match(motif, significant_motifs_bucket2))
+
+    print(head(rbp_identities_bucket2, 20))
+} else {
+    message("No significantly enriched motifs to report for Bucket 2.")
+}
+
+
+# --- Step 9: Create and Print Final Summary Table for Bucket 2 ---
+message("--- Final Summary of Enriched RBP Motifs (p_adj < 0.05) for Bucket 2 ---")
+if (exists("rbp_identities_bucket2") && nrow(rbp_identities_bucket2) > 0) {
+  
+  summary_table_bucket2 <- dplyr::left_join(
+    final_results_bucket2, 
+    rbp_identities_bucket2, 
+    by = "motif"
+  ) %>%
+  dplyr::filter(p_adj < 0.05) %>%
+  dplyr::select(motif, geneSymbol, odds_ratio, p_value, p_adj) %>%
+  dplyr::arrange(p_adj)
+
+  if(nrow(summary_table_bucket2) > 0){
+    print(knitr::kable(summary_table_bucket2, digits = 3, caption = "Enriched RBP Motifs (Bucket 2)"))
+  } else {
+    message("No motifs passed the significance threshold of p_adj < 0.05.")
+  }
+  
+} else {
+  message("No significantly enriched motifs were found to create a summary table.")
+}
+
+
+# --- Step 10: Overlap Enriched Motifs with a Specific Protein List for Bucket 2 ---
+message("--- Overlapping Enriched Motifs with Your Protein List for Bucket 2 ---")
+if (exists("summary_table_bucket2") && nrow(summary_table_bucket2) > 0) {
+  
+  overlapping_results_bucket2 <- summary_table_bucket2 %>%
+    dplyr::filter(geneSymbol %in% protein_list)
+  
+  if(nrow(overlapping_results_bucket2) > 0){
+    print(knitr::kable(
+      overlapping_results_bucket2, 
+      digits = 3, 
+      caption = "Enriched Motifs (Bucket 2) Overlapping with Your Protein List"
+    ))
+  } else {
+    message("No overlap found between the significantly enriched motifs and your protein list.")
+  }
+  
+} else {
+  message("No significant motifs were found in Step 9 to overlap with.")
+}
+
+
+# --- Step 11: Create a Summarized Dot Plot (Unique RBPs) ---
+message("--- Generating a summarized plot with unique RBPs for Bucket 2 ---")
+
+# First, make sure the final results and identities tables exist and are not empty
+if (exists("final_results_bucket2") && exists("rbp_identities_bucket2") && nrow(final_results_bucket2) > 0) {
+
+  # 1. Join the statistical results with the RBP gene symbol identities
+  enriched_rbps_all <- dplyr::left_join(
+    final_results_bucket2,
+    rbp_identities_bucket2,
+    by = "motif"
+  ) %>%
+  # Filter for significant results and remove any RBPs that couldn't be mapped to a gene symbol
+  dplyr::filter(p_adj < 0.05 & !is.na(geneSymbol) & is.finite(odds_ratio))
+
+  # 2. For each RBP (geneSymbol), find its single best result (lowest p-value)
+  enriched_rbps_unique <- enriched_rbps_all %>%
+    dplyr::group_by(geneSymbol) %>%
+    # slice_min() keeps the row with the minimum p_adj for each geneSymbol group
+    dplyr::slice_min(order_by = p_adj, n = 1, with_ties = FALSE) %>%
+    ungroup() # Ungroup for further operations
+
+  # 3. Create the dot plot using this summarized data
+  if(nrow(enriched_rbps_unique) > 0) {
+    summarized_dot_plot <- enriched_rbps_unique %>%
+      dplyr::top_n(15, -p_adj) %>%
+      dplyr::mutate(
+        log10_padj = -log10(p_adj),
+        # Reorder the y-axis by the odds ratio for better visualization
+        geneSymbol = fct_reorder(geneSymbol, odds_ratio)
+      ) %>%
+      ggplot(aes(x = odds_ratio, y = geneSymbol, size = odds_ratio, color = log10_padj)) +
+      geom_point(alpha = 0.8) +
+      scale_color_gradient(low = "lightblue", high = "firebrick") +
+      scale_size_continuous(range = c(4, 10)) + # Adjust range as needed
+      labs(
+        title = "Top 15 Enriched RBPs (Unique) in Foreground Genes (Bucket 2)",
+        x = "Odds Ratio",
+        y = "RBP (Gene Symbol)",
+        size = "Odds Ratio",
+        color = bquote(-Log[10]~"(p-adj)")
+      ) +
+      theme_minimal() +
+      theme(panel.grid = element_blank())
+
+    print(summarized_dot_plot)
+
+  } else {
+    message("No significant motifs remained after summarizing by gene symbol for Bucket 2.")
+  }
+
+} else {
+  message("No significant motifs found in the previous step to create a summarized plot for Bucket 2.")
+}
+
+#step 12
+
+
+
+# --- Step 2: Load Libraries and Prepare Data ---
+# Make sure the VennDiagram package is installed: install.packages("VennDiagram")
+library(VennDiagram)
+library(dplyr)
+
+message("--- Comparing Enriched RBPs (Bucket 2) with Your Protein List ---")
+
+# First, ensure the summary table from the previous step exists and is not empty
+if (exists("summary_table_bucket2") && nrow(summary_table_bucket2) > 0) {
+
+  # 1. Extract the unique gene symbols of significantly enriched RBPs from Bucket 2
+  enriched_rbps_bucket2 <- summary_table_bucket2 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(geneSymbol) %>%
+    unique()
+
+  # 2. Prepare the data for the Venn diagram
+  venn_list_overlap <- list(
+    `Enriched RBPs (Bucket 2)` = enriched_rbps_bucket2,
+    `Your Protein List` = protein_list
+  )
+
+  # 3. Create and draw the Venn diagram
+  grid.newpage() # Clears any previous plots
+
+  venn.plot <- venn.diagram(
+    x = venn_list_overlap,
+    filename = NULL, # This makes the plot appear in RStudio's plot pane
+    output = TRUE,
+
+    # --- Style Options ---
+    imagetype = "png",
+    col = c("#00BFC4", "#7CAE00"), # Colors for the circles
+    fill = c(alpha("#00BFC4", 0.3), alpha("#7CAE00", 0.3)),
+    cex = 1.5, # Size of the numbers in the circles
+    fontfamily = "sans",
+    cat.cex = 1.2, # Size of the category labels
+    cat.fontfamily = "sans",
+    cat.col = c("#00BFC4", "#7CAE00")
+  )
+
+  grid.draw(venn.plot)
+
+  # 4. List the common and unique proteins for clarity
+  common_proteins <- intersect(enriched_rbps_bucket2, protein_list)
+  unique_to_enriched <- setdiff(enriched_rbps_bucket2, protein_list)
+  unique_to_your_list <- setdiff(protein_list, enriched_rbps_bucket2)
+
+  cat("\n\n--- Summary of Overlap ---\n")
+  cat("\nProteins common to BOTH lists:", paste(common_proteins, collapse=", "), "\n")
+  cat("\nEnriched RBPs NOT in your list:", paste(head(unique_to_enriched), collapse=", "), "...\n")
+  cat("\nProteins from your list that were NOT enriched:", paste(unique_to_your_list, collapse=", "), "\n")
+
+} else {
+  message("No significant motifs were found in the previous step to create a Venn diagram.")
+}
+
+
+
+message("--- Comparing Enriched RBPs (Bucket 2) with Your Protein List ---")
+
+# First, ensure the necessary summary tables exist
+if (exists("summary_table_bucket2") && exists("rbp_only_motifs") && nrow(summary_table_bucket2) > 0) {
+
+  # 1. Extract the list of significantly enriched RBPs from Bucket 2
+  enriched_rbps_bucket2 <- summary_table_bucket2 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(geneSymbol) %>%
+    unique()
+
+  # 2. **CORRECTED UNIVERSE:** Define the total pool of proteins as ONLY those RBPs
+  # for which we had a motif in our filtered database.
+  total_rbp_universe <- unique(values(rbp_only_motifs)$geneSymbol)
+  message(paste("Statistical universe defined as the", length(total_rbp_universe), "RBPs with motifs in our database."))
+
+  # 3. Prepare the data for the Venn diagram
+  venn_list_overlap <- list(
+    `Enriched RBPs (Bucket 2)` = enriched_rbps_bucket2,
+    `Your Protein List` = protein_list
+  )
+  grid.newpage()
+  venn.plot <- venn.diagram(x = venn_list_overlap, filename = NULL, output = TRUE,
+                            col = c("#00BFC4", "#7CAE00"), fill = c(alpha("#00BFC4", 0.3), alpha("#7CAE00", 0.3)))
+  grid.draw(venn.plot)
+
+  # 4. Find the overlapping proteins
+  common_proteins <- intersect(enriched_rbps_bucket2, protein_list)
+
+  # 5. Perform the Hypergeometric Test with the CORRECT universe
+  message("\n--- Calculating Statistical Significance of Overlap ---")
+
+  q <- length(common_proteins)
+  m <- length(enriched_rbps_bucket2)
+  k <- length(intersect(protein_list, total_rbp_universe)) # Your list, but only members present in the universe
+  n <- length(total_rbp_universe) - m
+
+  # Calculate the p-value
+  p_value <- phyper(q - 1, m, n, k, lower.tail = FALSE)
+
+  cat("Overlap size:", q, "\n")
+  cat("Hypergeometric test p-value:", format.pval(p_value, digits = 3), "\n")
+  if (p_value < 0.05) {
+    cat("Result: The overlap is STATISTICALLY SIGNIFICANT.\n")
+  } else {
+    cat("Result: The overlap is NOT statistically significant.\n")
+  }
+
+} else {
+  message("No significant motifs were found to perform the overlap test.")
+}
+```
+Overlap with MAGEL2 interaction partner list filtered for RBPs with known motifs
+```{r}
+# --- Step 12: Compare Enriched RBPs (Bucket 2) with Your FILTERED Protein List ---
+
+# --- MODIFIED LIBRARIES ---
+# Make sure the eulerr package is installed: install.packages("eulerr")
+library(eulerr)     # For plotting area-proportional Euler diagrams
+library(grid)       # For drawing the plot grob
+library(dplyr)
+
+message("--- Comparing Enriched RBPs (Bucket 2) with Your FILTERED & ALIGNED Protein List ---")
+
+# First, ensure all necessary data objects exist
+if (exists("summary_table_bucket2") && 
+    exists("rbp_only_motifs") && 
+    exists("protein_list") && 
+    exists("rbp_data") &&
+    nrow(summary_table_bucket2) > 0) {
+
+  # 1. Define the Statistical Universe:
+  # ONLY those RBPs for which we had a motif in our filtered database
+  total_rbp_universe <- unique(values(rbp_only_motifs)$geneSymbol)
+  message(paste("Statistical universe defined as the", length(total_rbp_universe), "RBPs with motifs in our database."))
+
+  # 2. Define List A: Enriched RBPs
+  # These are already a subset of our universe by definition
+  enriched_rbps_bucket2 <- summary_table_bucket2 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(geneSymbol) %>%
+    unique()
+
+  # 3. Define List B: Your Filtered & Aligned Protein List
+  
+  # First, get all high-confidence RBPs from the score table
+  high_conf_rbps_from_table <- rbp_data %>%
+    dplyr::filter(RBP2GO_Score >= 10) %>%
+    dplyr::pull(Gene_Name) %>%
+    unique()
+  
+  # Filter your list by score
+  protein_list_high_conf <- intersect(protein_list, high_conf_rbps_from_table)
+  
+  # **NEW/UPDATED STEP:** Filter this high-conf list *again* by the universe
+  # This ensures List B only contains genes that were *possible* to find
+  protein_list_final <- intersect(protein_list_high_conf, total_rbp_universe)
+  
+  message(paste("Original 'protein_list' had", length(protein_list), "genes."))
+  message(paste("After filtering for RBP2GO_Score >= 10, it has", length(protein_list_high_conf), "genes."))
+  message(paste("After *also* filtering for presence in motif universe, your final list (List B) has", length(protein_list_final), "genes."))
+
+
+  # 4. Prepare the data for the Euler diagram
+  venn_list_overlap <- list(
+    `Enriched RBPs (List A)` = enriched_rbps_bucket2,
+    `Your Aligned List (List B)` = protein_list_final 
+  )
+  
+  # --- MODIFIED PLOTTING STEP ---
+  # 5. Create and draw the Euler diagram
+  # This replaces the old VennDiagram code
+  message("\n--- Generating Euler Diagram ---")
+  grid.newpage() # Clear the plot device
+  
+  # Create the euler plot object using the style from your example
+  # quantities = TRUE adds the numbers to the segments
+  euler_plot_grob <- plot(euler(venn_list_overlap), quantities = TRUE)
+  
+  # Draw the plot to the graphics device
+  grid.draw(euler_plot_grob)
+  # --- END OF PLOTTING MODIFICATION ---
+
+
+  # 6. Find the overlapping proteins (This was step 5)
+  common_proteins <- intersect(enriched_rbps_bucket2, protein_list_final)
+
+  # 7. Perform the Hypergeometric Test (This was step 6)
+  message("\n--- Calculating Statistical Significance of Overlap ---")
+
+  # q = number of overlapping genes (our successes)
+  q <- length(common_proteins)
+  
+  # m = total number of "successes" in the universe (List A)
+  m <- length(enriched_rbps_bucket2)
+  
+  # k = the size of our "draw" (List B)
+  k <- length(protein_list_final) 
+  
+  # n = total number of "failures" in the universe (all RBPs in universe - List A)
+  n <- length(total_rbp_universe) - m
+
+  # Calculate the p-value:
+  p_value <- phyper(q - 1, m, n, k, lower.tail = FALSE)
+
+  cat("--- Test Parameters --- \n")
+  cat("Overlap size (q):", q, "\n")
+  cat("Size of Enriched List 'm' (List A):", m, "\n")
+  cat("Size of Your Aligned List 'k' (List B):", k, "\n")
+  cat("Size of Universe 'm+n':", m + n, "\n")
+  cat("---------------------- \n")
+  cat("Hypergeometric test p-value:", format.pval(p_value, digits = 3), "\n")
+  
+  if (p_value < 0.05) {
+    cat("Result: The overlap is STATISTICALLY SIGNIFICANT.\n")
+  } else {
+    cat("Result: The overlap is NOT statistically significant.\n")
+  }
+
+} else {
+  message("One or more required objects are missing ('summary_table_bucket2', 'rbp_only_motifs', 'protein_list', 'rbp_data') or no significant motifs were found.")
+}
+```
+
+
+
+
+Overlap of bucket 1 and bucket 2
+```{r}
+# --- Step 11: Overlap Bucket 1 and Bucket 2 Results ---
+
+# --- MODIFIED LIBRARIES ---
+# Make sure the eulerr package is installed: install.packages("eulerr")
+library(eulerr)     # For plotting area-proportional Euler diagrams
+library(grid)       # For drawing the plot grob
+library(dplyr)
+
+message("--- Comparing Enriched RBPs from Bucket 1 and Bucket 2 ---")
+
+# First, ensure the necessary summary tables exist and are not empty
+if (exists("summary_table_bucket1") && exists("summary_table_bucket2") &&
+    exists("rbp_only_motifs") && # Added check for universe
+    nrow(summary_table_bucket1) > 0) {
+
+  # 1. Extract the unique gene symbols of significantly enriched RBPs from each bucket
+  bucket1_rbps <- summary_table_bucket1 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(geneSymbol) %>%
+    unique()
+
+  bucket2_rbps <- summary_table_bucket2 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(geneSymbol) %>%
+    unique()
+
+  # 2. Prepare the data for the Euler diagram
+  venn_list <- list(
+    `Bucket 1 (Prot UP)` = bucket1_rbps,
+    `Bucket 2 (Prot DOWN)` = bucket2_rbps
+  )
+
+  # --- MODIFIED PLOTTING STEP ---
+  # 3. Create and draw the Euler diagram
+  message("\n--- Generating Euler Diagram ---")
+  grid.newpage() # Clear the plot device
+  
+  # Create the euler plot object
+  euler_plot_grob <- plot(euler(venn_list), quantities = TRUE)
+  
+  # Draw the plot to the graphics device
+  grid.draw(euler_plot_grob)
+  # --- END OF PLOTTING MODIFICATION ---
+
+
+  # 4. List the common and unique proteins
+  common_rbps <- intersect(bucket1_rbps, bucket2_rbps)
+  cat("\n--- Summary of Overlap ---\n")
+  cat("\nRBPs common to BOTH buckets:", paste(common_rbps, collapse=", "), "\n")
+
+
+  # --- Step 5: Perform the Hypergeometric Test for Statistical Significance ---
+  message("\n--- Calculating Statistical Significance of Overlap ---")
+
+  # Define the "universe" as all RBPs with motifs that were tested in our analysis
+  total_rbp_universe <- unique(values(rbp_only_motifs)$geneSymbol)
+
+  # Define the four numbers for the test:
+  q <- length(common_rbps) # Overlap
+  m <- length(bucket1_rbps) # Size of List 1
+  k <- length(bucket2_rbps) # Size of List 2
+  n <- length(total_rbp_universe) - m # All non-List 1 items in universe
+
+  # Calculate the p-value for the overlap
+  p_value <- phyper(q - 1, m, n, k, lower.tail = FALSE)
+
+  cat("\nOverlap size (q):", q, "\n")
+  cat("Size of List 1 'm' (Bucket 1):", m, "\n")
+  cat("Size of List 2 'k' (Bucket 2):", k, "\n")
+  cat("Size of Universe 'm+n':", m + n, "\n")
+  cat("---------------------- \n")
+  cat("Hypergeometric test p-value:", format.pval(p_value, digits = 3), "\n")
+
+  if (p_value < 0.05) {
+    cat("Result: The overlap between Bucket 1 and Bucket 2 enriched RBPs is STATISTICALLY SIGNIFICANT.\n")
+  } else {
+    cat("Result: The overlap is NOT statistically significant.\n")
+  }
+
+} else {
+  message("One or more required objects are missing ('summary_table_bucket1', 'summary_table_bucket2', 'rbp_only_motifs') or the summary tables are empty. Cannot perform overlap analysis.")
+}
+```
+
+```{r}
+# --- STEP 1: SET YOUR GENES OF INTEREST HERE ---
+# This list now contains all the RBPs you provided.
+genes_to_plot <- c(
+  # Common to both buckets
+  "TSN", "PTCD1", "FHL2", "MRPL2", "CNOT6", "RBM42", "ZNF71", "RBM22", "ZSCAN31", "RAN", "ATF2", "WDR83", "ESRP1", "PURG", "HBP1", "DHX36", "DTL", "SNRNP70", "CHD2", "CDX1", "EWSR1", "GATA1", "SRF", "HES7", "SOX4", "WT1", "CEBPB", "ATF1", "MAX", "SMAD2", "TFE3", "JUN", "CREB1", "XBP1", "BPTF", "FOXK1", "FUBP1", "HLTF", "KLF12", "SMAD1", "FOXA2", "PAX6", "SMAD3", "STAT3", "ZNF41", "POU2F1", "FOXP1", "PBX2", "ZNF317", "ZNF257", "ZNF148", "CTCFL", "ZNF263", "BNC2", "PATZ1", "ZNF281", "NRF1", "CDC5L", "GZF1", "PRDM14", "STAT6", "WRNIP1", "ZBTB33", "GABPA", "SOX2", "FOXA3", "PSMC2", "LRRFIP1", "RELA", "YY1", "TFAP4", "RAB2A", "TIMM8A", "CEBPZ", "DLX4", "RARA", "NME1", "SPI1", "FOXC1", "KLF3",
+  # Unique to Bucket 1
+  "LARP1", "MDM2", "SRP9", "ADARB1", "TRIP10", "SUCLG1", "XRCC1", "E4F1", "AGGF1", "CYB5R1", "GCM2", "MRPL1", "NKX2-1", "MRPS25", "HSPA5", "POLE3", "FOXP4", "EXOSC3", "RFX3", "ZNF143", "ZNF140", "ZNF76", "ZNF324", "ZNF354A", "ZNF582", "ZNF701",
+  # Unique to Bucket 2
+  "GATA3", "ACO1", "ASPSCR1", "ESRRA", "HOXB6", "SND1", "R3HDM2", "TSNAX", "RFC3", "NELFB", "PTPMT1", "SOX9", "RPL35", "DLX2", "NR0B1", "RBBP5", "ESRP2", "MEX3C", "ZNF124", "SF1", "ZNF207", "SRRM3", "NMI", "CSNK2B", "GAR1", "DDX43", "LARP4", "RPS4X", "TRMT1", "TFDP1", "MYEF2", "NFIC", "MSI2", "ZEB1", "LAS1L", "TFAM", "TCEAL2", "NKX3-1", "PSMA6", "SNAPC4", "RBM3", "NUP107", "RBFOX2", "UBXN1", "PDCD11", "KLF13", "SRBD1", "HDAC8", "RNASEH2C", "BOLL", "SMAD4", "HNRNPH3", "PICK1", "UTP18", "RAB18", "MAPK1", "SPATS2", "GIT2", "HIRIP3", "USP39", "BRCA1", "PPARG", "ZNF830", "DDX4", "TOB2", "PITX3", "KLF7", "SMARCC1", "RNF138", "NFKB1", "EGR1", "NFKB2", "MAZ", "RFX5", "C19orf25", "CCDC25", "CSTF2", "DIS3", "ENO1", "GTPBP6", "RPL6", "STAT1", "FOXK2", "NR1H4", "POU5F1", "NKX2-5", "CBFB", "YBX1", "PAXIP1", "PKM", "UGP2", "CELF4", "TFEC", "BAX", "ZNF706", "ABCF2", "TPI1", "GTPBP1", "NOC2L", "OTUD4", "ZRSR2", "PPP1R10", "MGA", "UBE2V1", "MSX2", "HOXD4", "CPEB1", "GRHPR", "KDM5A", "A1CF", "MSI1", "MBD2", "GTF2B", "STUB1", "DAZAP1", "MECP2", "RIOK2", "PCK2", "RFC2", "LSM6", "CLK1", "CELF6", "HNRNPC"
+)
+
+
+
+# --- STEP 2: LOAD LIBRARIES AND YOUR DATA ---
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(SummarizedExperiment)
+library(DESeq2)
+library(patchwork) # Library for combining plots
+
+message("Loading data...")
+tryCatch({
+    # Proteome
+    new_data_imp_8330 <- readRDS("new_data_imp_8330_BH_new.rds"); dep_8330 <- readRDS("dep_8330_BH_new.rds")
+    new_data_imp_MGH <- readRDS("new_data_imp_MGH_BH_new.rds"); dep_MGH <- readRDS("dep_MGH_BH_new.rds")
+    # Ubiquitome
+    Ubi_data_imp_8330 <- readRDS("Ubi_Ubi_data_imp_8330_BH_new.rds"); Ubi_dep_8330 <- readRDS("Ubi_Ubi_dep_8330_BH_new.rds")
+    Ubi_data_imp_MGH <- readRDS("Ubi_Ubi_data_imp_MGH_BH_new.rds"); Ubi_dep_MGH <- readRDS("Ubi_Ubi_dep_MGH_BH_new.rds")
+    # RNA-Seq
+    dds_RNA <- readRDS(file = "dds_RNA_30102024.rds"); DEG_list_MGH <- readRDS(file = "DEG_list_MGH_30102024.rds"); DEG_list_8330 <- readRDS(file = "DEG_list_8330_30102024.rds")
+    
+    # Prepare RNA Data
+    dds_RNA_8330 <- dds_RNA[, dds_RNA$background == "8330"]; dds_RNA_MGH <- dds_RNA[, dds_RNA$background == "MGH"]
+    colData(dds_RNA_8330)$condition <- colData(dds_RNA_8330)$genotype; colData(dds_RNA_MGH)$condition <- colData(dds_RNA_MGH)$genotype
+    
+    message("All data loaded and prepared successfully.")
+}, error = function(e) {
+    stop("Data loading failed: ", e$message)
+})
+
+# --- STEP 3: DEFINE MASTER ORDER AND PLOTTING FUNCTION ---
+
+master_condition_order <- levels(colData(dds_RNA_8330)$condition)
+message("Master condition order set to: ", paste(master_condition_order, collapse=", "))
+
+gg_color_hue <- function(n) { hues = seq(15, 375, length = n + 1); hcl(h = hues, l = 65, c = 100)[1:n] }
+get_significance_label <- function(p_adj) {
+  if (is.na(p_adj)) { return("") } else if (p_adj <= 0.0001) { return("****") }
+  else if (p_adj <= 0.001) { return("***") } else if (p_adj <= 0.01) { return("**") }
+  else if (p_adj <= 0.05) { return("*") } else { return("ns") }
+}
+
+### Final plotAbundance function with updated theme ###
+plotAbundance <- function(data, GOI, dep_results, ref_group = "WT",
+                          plot_color = "grey80", data_source_label = "",
+                          master_order,
+                          star_vjust = -0.5, star_size = 6) {
+
+  if (!GOI %in% rownames(data)) {
+     return(ggplot() + theme_void() + annotate("text", x=0.5, y=0.5, label="Gene not found\nin this dataset") + ggtitle(GOI) + labs(subtitle=data_source_label))
+  }
+
+  if (inherits(data, "DESeqDataSet")) {
+      if (is.null(sizeFactors(data))) data <- estimateSizeFactors(data); expr_values <- counts(data, normalized = TRUE)[GOI, ]; y_axis_label <- "Normalized Counts"
+  } else if (is(data, "SummarizedExperiment")) {
+      expr_values <- assay(data)[GOI, ]; y_axis_label <- "Normalized log2 Intensity"
+  }
+
+  plot_df <- data.frame(expression = expr_values, condition = colData(data)$condition)
+  plot_df$condition <- factor(plot_df$condition, levels = master_order)
+  other_conditions <- setdiff(master_order, ref_group)
+
+  annotation_info <- list(); y_offset <- diff(range(plot_df$expression, na.rm = TRUE)) * 0.05
+  if (!is.finite(y_offset) || y_offset == 0) y_offset <- max(abs(plot_df$expression), na.rm=TRUE) * 0.05
+  
+  if (is(dep_results, "SummarizedExperiment")) { results_metadata <- as.data.frame(elementMetadata(dep_results)); goi_idx <- which(results_metadata$name == GOI)[1]
+    if (length(goi_idx) > 0 && !is.na(goi_idx)) { for (cond in other_conditions) { p_col_name <- paste0(cond, "_vs_", ref_group, "_p.adj")
+        if (p_col_name %in% names(results_metadata)) { p_adj <- results_metadata[goi_idx, p_col_name]; signif_label <- get_significance_label(p_adj)
+          if (signif_label != "ns" && signif_label != "") { max_y <- max(plot_df$expression[plot_df$condition == cond], na.rm = TRUE); annotation_info[[cond]] <- data.frame(condition = cond, y_pos = max_y + y_offset, label = signif_label) }
+        }
+    }}
+  } else if (is(dep_results, "list")) {
+    for (cond in other_conditions) { res_name <- paste0("genotype_", cond, "_vs_", ref_group)
+      if (res_name %in% names(dep_results)) { res_obj <- dep_results[[res_name]]
+        if (is(res_obj, "DESeqResults") && GOI %in% rownames(res_obj)) { p_adj <- res_obj[GOI, "padj"]; signif_label <- get_significance_label(p_adj)
+          if (signif_label != "ns" && signif_label != "") { max_y <- max(plot_df$expression[plot_df$condition == cond], na.rm = TRUE); annotation_info[[cond]] <- data.frame(condition = cond, y_pos = max_y + y_offset, label = signif_label) }
+        }
+      }
+    }
+  }
+  annotation_df <- bind_rows(annotation_info)
+
+  p <- ggplot(plot_df, aes(x = condition, y = expression)) +
+    geom_boxplot(fill = plot_color, alpha = 0.6, color = NA, outlier.shape = NA) +
+    geom_boxplot(fill = NA, color = plot_color, outlier.shape = NA) +
+    geom_jitter(color = plot_color, size = 3.5, width = 0.1, alpha = 0.7) +
+    scale_x_discrete(drop = FALSE) +
+    labs(title = GOI, subtitle = data_source_label, y = y_axis_label, x = NULL) +
+    theme_bw(base_size = 16) +
+    theme(
+      text = element_text(color = "black"), axis.text = element_text(color = "black"),
+      axis.ticks = element_line(color = "black"), axis.title.y = element_text(size = 12),
+      panel.border = element_blank(), # <<< CHANGE 1: Remove the full border
+      axis.line.x = element_line(color = "black"), # <<< CHANGE 2: Add back only the x-axis line
+      axis.line.y = element_line(color = "black"), # <<< CHANGE 3: Add back only the y-axis line
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      plot.margin = margin(t = 20, r = 5, b = 5, l = 5, "pt")
+    )
+
+  if (nrow(annotation_df) > 0) {
+    p <- p + geom_text(data = annotation_df, aes(x = condition, y = y_pos, label = label), inherit.aes = FALSE, size = star_size, vjust = star_vjust)
+  }
+  
+  min_y <- min(plot_df$expression, na.rm = TRUE)
+  max_y_data <- max(plot_df$expression, na.rm = TRUE)
+  max_y_annot <- if (nrow(annotation_df) > 0) max(annotation_df$y_pos, na.rm = TRUE) else -Inf
+  highest_point <- max(max_y_data, max_y_annot, na.rm = TRUE)
+  final_upper_limit <- highest_point + (diff(range(plot_df$expression, na.rm=TRUE)) * 0.15)
+  p <- p + coord_cartesian(ylim = c(min_y, final_upper_limit), clip = "off")
+
+  return(p)
+}
+
+# --- STEP 4: GENERATE AND PRINT PLOTS FOR EACH GENE ---
+plot_colors <- gg_color_hue(2)
+my_color_8330 <- plot_colors[1]
+my_color_MGH <- plot_colors[2]
+
+for (current_goi in genes_to_plot) {
+  message(paste("\n\n<<<<<<<<<< GENERATING PLOTS FOR GENE:", current_goi, ">>>>>>>>>>\n"))
+
+  tryCatch({
+  
+    p_prot_8330 <- plotAbundance(new_data_imp_8330, current_goi, dep_8330, master_order = master_condition_order, plot_color = my_color_8330, data_source_label = "Proteome - 8330")
+    p_prot_MGH <- plotAbundance(new_data_imp_MGH, current_goi, dep_MGH, master_order = master_condition_order, plot_color = my_color_MGH, data_source_label = "Proteome - MGH")
+  
+    message(paste("\n--- Individual Plots for", current_goi, "---"))
+   print(p_prot_8330); print(p_prot_MGH)
+    
+    message(paste("\n--- Combined RNA-Seq and Proteome Grid for", current_goi, "---"))
+    
+
+  }, error = function(e) {
+    message(paste("!!! An error occurred while plotting", current_goi, ":", e$message, "!!!"))
+  })
+  
+  message(paste("\n<<<<<<<<<< Finished plotting for", current_goi, ">>>>>>>>>>"))
+}
+```
+
+```{r}
+# --- STEP 1: SET YOUR GENES OF INTEREST HERE ---
+# This list now contains all the RBPs you provided.
+genes_to_plot <- c("RBM3", "HNRNPH3", "ENO1", "YBX1", "HNRNPC"
+  
+)
+
+
+
+# --- STEP 2: LOAD LIBRARIES AND YOUR DATA ---
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(SummarizedExperiment)
+library(DESeq2)
+library(patchwork) # Library for combining plots
+
+message("Loading data...")
+tryCatch({
+    # Proteome
+    new_data_imp_8330 <- readRDS("new_data_imp_8330_BH_new.rds"); dep_8330 <- readRDS("dep_8330_BH_new.rds")
+    new_data_imp_MGH <- readRDS("new_data_imp_MGH_BH_new.rds"); dep_MGH <- readRDS("dep_MGH_BH_new.rds")
+    # Ubiquitome
+    Ubi_data_imp_8330 <- readRDS("Ubi_Ubi_data_imp_8330_BH_new.rds"); Ubi_dep_8330 <- readRDS("Ubi_Ubi_dep_8330_BH_new.rds")
+    Ubi_data_imp_MGH <- readRDS("Ubi_Ubi_data_imp_MGH_BH_new.rds"); Ubi_dep_MGH <- readRDS("Ubi_Ubi_dep_MGH_BH_new.rds")
+    # RNA-Seq
+    dds_RNA <- readRDS(file = "dds_RNA_30102024.rds"); DEG_list_MGH <- readRDS(file = "DEG_list_MGH_30102024.rds"); DEG_list_8330 <- readRDS(file = "DEG_list_8330_30102024.rds")
+    
+    # Prepare RNA Data
+    dds_RNA_8330 <- dds_RNA[, dds_RNA$background == "8330"]; dds_RNA_MGH <- dds_RNA[, dds_RNA$background == "MGH"]
+    colData(dds_RNA_8330)$condition <- colData(dds_RNA_8330)$genotype; colData(dds_RNA_MGH)$condition <- colData(dds_RNA_MGH)$genotype
+    
+    message("All data loaded and prepared successfully.")
+}, error = function(e) {
+    stop("Data loading failed: ", e$message)
+})
+
+# --- STEP 3: DEFINE MASTER ORDER AND PLOTTING FUNCTION ---
+
+master_condition_order <- levels(colData(dds_RNA_8330)$condition)
+message("Master condition order set to: ", paste(master_condition_order, collapse=", "))
+
+gg_color_hue <- function(n) { hues = seq(15, 375, length = n + 1); hcl(h = hues, l = 65, c = 100)[1:n] }
+get_significance_label <- function(p_adj) {
+  if (is.na(p_adj)) { return("") } else if (p_adj <= 0.0001) { return("****") }
+  else if (p_adj <= 0.001) { return("***") } else if (p_adj <= 0.01) { return("**") }
+  else if (p_adj <= 0.05) { return("*") } else { return("ns") }
+}
+
+### Final plotAbundance function with updated theme ###
+plotAbundance <- function(data, GOI, dep_results, ref_group = "WT",
+                          plot_color = "grey80", data_source_label = "",
+                          master_order,
+                          star_vjust = -0.5, star_size = 6) {
+
+  if (!GOI %in% rownames(data)) {
+     return(ggplot() + theme_void() + annotate("text", x=0.5, y=0.5, label="Gene not found\nin this dataset") + ggtitle(GOI) + labs(subtitle=data_source_label))
+  }
+
+  if (inherits(data, "DESeqDataSet")) {
+      if (is.null(sizeFactors(data))) data <- estimateSizeFactors(data); expr_values <- counts(data, normalized = TRUE)[GOI, ]; y_axis_label <- "Normalized Counts"
+  } else if (is(data, "SummarizedExperiment")) {
+      expr_values <- assay(data)[GOI, ]; y_axis_label <- "Normalized log2 Intensity"
+  }
+
+  plot_df <- data.frame(expression = expr_values, condition = colData(data)$condition)
+  plot_df$condition <- factor(plot_df$condition, levels = master_order)
+  other_conditions <- setdiff(master_order, ref_group)
+
+  annotation_info <- list(); y_offset <- diff(range(plot_df$expression, na.rm = TRUE)) * 0.05
+  if (!is.finite(y_offset) || y_offset == 0) y_offset <- max(abs(plot_df$expression), na.rm=TRUE) * 0.05
+  
+  if (is(dep_results, "SummarizedExperiment")) { results_metadata <- as.data.frame(elementMetadata(dep_results)); goi_idx <- which(results_metadata$name == GOI)[1]
+    if (length(goi_idx) > 0 && !is.na(goi_idx)) { for (cond in other_conditions) { p_col_name <- paste0(cond, "_vs_", ref_group, "_p.adj")
+        if (p_col_name %in% names(results_metadata)) { p_adj <- results_metadata[goi_idx, p_col_name]; signif_label <- get_significance_label(p_adj)
+          if (signif_label != "ns" && signif_label != "") { max_y <- max(plot_df$expression[plot_df$condition == cond], na.rm = TRUE); annotation_info[[cond]] <- data.frame(condition = cond, y_pos = max_y + y_offset, label = signif_label) }
+        }
+    }}
+  } else if (is(dep_results, "list")) {
+    for (cond in other_conditions) { res_name <- paste0("genotype_", cond, "_vs_", ref_group)
+      if (res_name %in% names(dep_results)) { res_obj <- dep_results[[res_name]]
+        if (is(res_obj, "DESeqResults") && GOI %in% rownames(res_obj)) { p_adj <- res_obj[GOI, "padj"]; signif_label <- get_significance_label(p_adj)
+          if (signif_label != "ns" && signif_label != "") { max_y <- max(plot_df$expression[plot_df$condition == cond], na.rm = TRUE); annotation_info[[cond]] <- data.frame(condition = cond, y_pos = max_y + y_offset, label = signif_label) }
+        }
+      }
+    }
+  }
+  annotation_df <- bind_rows(annotation_info)
+
+  p <- ggplot(plot_df, aes(x = condition, y = expression)) +
+    geom_boxplot(fill = plot_color, alpha = 0.6, color = NA, outlier.shape = NA) +
+    geom_boxplot(fill = NA, color = plot_color, outlier.shape = NA) +
+    geom_jitter(color = plot_color, size = 3.5, width = 0.1, alpha = 0.7) +
+    scale_x_discrete(drop = FALSE) +
+    labs(title = GOI, subtitle = data_source_label, y = y_axis_label, x = NULL) +
+    theme_bw(base_size = 16) +
+    theme(
+      text = element_text(color = "black"), axis.text = element_text(color = "black"),
+      axis.ticks = element_line(color = "black"), axis.title.y = element_text(size = 12),
+      panel.border = element_blank(), # <<< CHANGE 1: Remove the full border
+      axis.line.x = element_line(color = "black"), # <<< CHANGE 2: Add back only the x-axis line
+      axis.line.y = element_line(color = "black"), # <<< CHANGE 3: Add back only the y-axis line
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      plot.margin = margin(t = 20, r = 5, b = 5, l = 5, "pt")
+    )
+
+  if (nrow(annotation_df) > 0) {
+    p <- p + geom_text(data = annotation_df, aes(x = condition, y = y_pos, label = label), inherit.aes = FALSE, size = star_size, vjust = star_vjust)
+  }
+  
+  min_y <- min(plot_df$expression, na.rm = TRUE)
+  max_y_data <- max(plot_df$expression, na.rm = TRUE)
+  max_y_annot <- if (nrow(annotation_df) > 0) max(annotation_df$y_pos, na.rm = TRUE) else -Inf
+  highest_point <- max(max_y_data, max_y_annot, na.rm = TRUE)
+  final_upper_limit <- highest_point + (diff(range(plot_df$expression, na.rm=TRUE)) * 0.15)
+  p <- p + coord_cartesian(ylim = c(min_y, final_upper_limit), clip = "off")
+
+  return(p)
+}
+
+# --- STEP 4: GENERATE AND PRINT PLOTS FOR EACH GENE ---
+plot_colors <- gg_color_hue(2)
+my_color_8330 <- plot_colors[1]
+my_color_MGH <- plot_colors[2]
+
+for (current_goi in genes_to_plot) {
+  message(paste("\n\n<<<<<<<<<< GENERATING PLOTS FOR GENE:", current_goi, ">>>>>>>>>>\n"))
+
+  tryCatch({
+  
+    p_prot_8330 <- plotAbundance(new_data_imp_8330, current_goi, dep_8330, master_order = master_condition_order, plot_color = my_color_8330, data_source_label = "Proteome - 8330")
+    p_prot_MGH <- plotAbundance(new_data_imp_MGH, current_goi, dep_MGH, master_order = master_condition_order, plot_color = my_color_MGH, data_source_label = "Proteome - MGH")
+  
+    message(paste("\n--- Individual Plots for", current_goi, "---"))
+   print(p_prot_8330); print(p_prot_MGH)
+    
+    message(paste("\n--- Combined RNA-Seq and Proteome Grid for", current_goi, "---"))
+    
+
+  }, error = function(e) {
+    message(paste("!!! An error occurred while plotting", current_goi, ":", e$message, "!!!"))
+  })
+  
+  message(paste("\n<<<<<<<<<< Finished plotting for", current_goi, ">>>>>>>>>>"))
+}
+```
+
+
+MotifMatchR miRNAs
+```{r}
+# --- Step 1: Load Libraries ---
+library(DBI)
+library(targetscan.Hs.eg.db)
+library(Biostrings)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(knitr)
+library(tidyverse)
+
+
+# This script assumes 'foreground_genes_bucket1' and 'background_genes' are pre-defined.
+
+
+# --- Step 3: Prepare Sequences and Gene Lists ---
+message("Fetching 3' UTRs and mapping to gene symbols for Bucket 1...")
+utrs <- threeUTRsByTranscript(TxDb.Hsapiens.UCSC.hg38.knownGene, use.names = TRUE)
+tx_names <- names(utrs)
+tx2geneid <- AnnotationDbi::select(
+  TxDb.Hsapiens.UCSC.hg38.knownGene, keys = tx_names,
+  keytype = "TXNAME", columns = "GENEID"
+)
+geneid2symbol <- AnnotationDbi::select(
+  org.Hs.eg.db, keys = unique(tx2geneid$GENEID),
+  keytype = "ENTREZID", columns = "SYMBOL"
+)
+tx2symbol <- dplyr::left_join(tx2geneid, geneid2symbol, by = c("GENEID" = "ENTREZID")) %>%
+  dplyr::filter(!is.na(SYMBOL) & !is.na(TXNAME))
+foreground_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% foreground_genes_bucket1) %>%
+  dplyr::pull(TXNAME) %>% unique()
+background_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% background_genes) %>%
+  dplyr::pull(TXNAME) %>% unique()
+if (length(foreground_tx_names) == 0) {
+  stop("Error: None of the foreground gene symbols could be mapped to a transcript.")
+}
+message("Extracting genomic sequences...")
+utrs_foreground <- utrs[names(utrs) %in% foreground_tx_names]
+utrs_background <- utrs[names(utrs) %in% background_tx_names]
+seqs_foreground_dna <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_foreground)
+seqs_background_dna <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_background)
+
+
+# --- Step 4: Prepare miRNA Motifs from TargetScan ---
+message("Preparing miRNA seed region motifs from TargetScan...")
+db_path <- system.file("extdata", "targetscan.Hs.eg.sqlite", package = "targetscan.Hs.eg.db")
+con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+family_table <- DBI::dbReadTable(con, "mirna_family")
+mirbase_table <- DBI::dbReadTable(con, "mirbase")
+DBI::dbDisconnect(con)
+master_table <- dplyr::inner_join(family_table, mirbase_table, by = c("X_id" = "family"))
+mirs_filtered <- master_table %>%
+  dplyr::select(miR_Family = name, seed_m8) %>%
+  dplyr::distinct()
+
+mir_seeds_dna <- gsub("U", "T", mirs_filtered$seed_m8)
+names(mir_seeds_dna) <- mirs_filtered$miR_Family
+mir_seeds_dna <- mir_seeds_dna[!is.na(mir_seeds_dna)]
+message(paste("Successfully prepared", length(mir_seeds_dna), "unique miRNA motifs for analysis."))
+
+
+# --- Step 5: Find Motif Matches using Biostrings ---
+message("Scanning DNA sequences for miRNA motif matches...")
+seqs_foreground_flat <- unlist(seqs_foreground_dna)
+seqs_background_flat <- unlist(seqs_background_dna)
+
+foreground_counts_list <- lapply(mir_seeds_dna, function(seed) {
+    Biostrings::vcountPattern(pattern = seed, 
+                              subject = seqs_foreground_flat, 
+                              max.mismatch = 0)
+})
+motif_hits_foreground <- do.call(cbind, foreground_counts_list)
+
+background_counts_list <- lapply(mir_seeds_dna, function(seed) {
+    Biostrings::vcountPattern(pattern = seed, 
+                              subject = seqs_background_flat, 
+                              max.mismatch = 0)
+})
+motif_hits_background <- do.call(cbind, background_counts_list)
+
+
+# --- Step 6: Perform Enrichment Analysis for miRNAs (Bucket 1) ---
+message("Performing Fisher's exact test for enrichment...")
+final_results_miRNA_bucket1 <- tibble() 
+if (ncol(motif_hits_foreground) > 0) {
+    foreground_hits <- colSums(motif_hits_foreground > 0)
+    background_hits <- colSums(motif_hits_background > 0)
+    
+    num_foreground_seqs <- nrow(motif_hits_foreground)
+    num_background_seqs <- nrow(motif_hits_background)
+
+    fisher_results <- lapply(1:length(mir_seeds_dna), function(i) {
+        tbl <- matrix(c(
+            foreground_hits[i], background_hits[i],
+            num_foreground_seqs - foreground_hits[i],
+            num_background_seqs - background_hits[i]
+        ), nrow = 2)
+        fisher.test(tbl, alternative = "greater")
+    })
+
+    final_results_miRNA_bucket1 <- tibble(
+        miR_Family = names(mir_seeds_dna),
+        p_value = sapply(fisher_results, "[[", "p.value"),
+        odds_ratio = sapply(fisher_results, function(x) x$estimate)
+    ) %>%
+    dplyr::mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    dplyr::arrange(p_adj)
+} else {
+    warning("Motif matching returned an empty result.")
+}
+print("Top 20 enriched miRNA Families for Bucket 1:")
+print(head(final_results_miRNA_bucket1, 20))
+
+
+# --- Step 7: Visualize the Results for miRNAs (Bucket 1) ---
+
+
+if (nrow(final_results_miRNA_bucket1) > 0) {
+  message("Generating final results dot plot for miRNAs (Bucket 1)...")
+  
+  top_motifs_plot_miRNA_bucket1 <- final_results_miRNA_bucket1 %>%
+    # Data preparation steps
+    dplyr::filter(is.finite(odds_ratio) & p_adj < 0.05) %>%
+    dplyr::top_n(15, -p_adj) %>%
+    dplyr::mutate(
+      log10_padj = -log10(p_adj),
+      miR_Family = fct_reorder(miR_Family, odds_ratio) 
+    ) %>%
+    
+    # ggplot call with aesthetics
+    ggplot(aes(x = odds_ratio, y = miR_Family, size = odds_ratio, color = log10_padj)) +
+    geom_point(alpha = 0.8) +
+    
+    # Define the color scale
+    scale_color_gradient(low = "lightblue", high = "firebrick") +
+    
+    # --- CHANGE HERE ---
+    # Define the size scale with your four specified breaks
+    scale_size_continuous(range = c(4, 10), breaks = c(1.4, 1.6, 1.8, 2.0)) +
+    
+    # Use labs() to provide distinct titles for each legend
+    labs(
+      title = "Top 15 Enriched miRNA Motifs in Foreground Genes (Bucket 1)",
+      x = "Odds Ratio",
+      y = "miRNA Family",
+      size = "Odds Ratio",
+      color = bquote(-Log[10]~"(p-adj)")
+    ) +
+    
+    # Apply a minimal theme and remove gridlines
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(top_motifs_plot_miRNA_bucket1)
+  
+} else {
+  message("No significant miRNA motifs found to plot for Bucket 1.")
+}
+
+
+# --- Step 8: Print Final Summary Table for miRNAs (Bucket 1) ---
+message("--- Final Summary of Enriched miRNA Motifs (p_adj < 0.05) for Bucket 1 ---")
+if (nrow(final_results_miRNA_bucket1) > 0) {
+  
+  summary_table_miRNA_bucket1 <- final_results_miRNA_bucket1 %>%
+    dplyr::filter(p_adj < 0.05)
+  
+  if(nrow(summary_table_miRNA_bucket1) > 0){
+    print(knitr::kable(summary_table_miRNA_bucket1, digits = 3, caption = "Enriched miRNA Motifs (Bucket 1)"))
+  } else {
+    message("No motifs passed the significance threshold of p_adj < 0.05.")
+  }
+} else {
+  message("No enrichment results were generated to create a summary table.")
+}
+```
+
+Enriched miRNA motifs in bucket 2
+```{r}
+# --- Step 1: Load Libraries ---
+library(DBI)
+library(targetscan.Hs.eg.db)
+library(Biostrings)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(knitr)
+library(tidyverse)
+
+
+# --- Step 3: Prepare Sequences and Gene Lists ---
+message("Fetching 3' UTRs and mapping to gene symbols for Bucket 2...")
+utrs <- threeUTRsByTranscript(TxDb.Hsapiens.UCSC.hg38.knownGene, use.names = TRUE)
+tx_names <- names(utrs)
+tx2geneid <- AnnotationDbi::select(
+  TxDb.Hsapiens.UCSC.hg38.knownGene, keys = tx_names,
+  keytype = "TXNAME", columns = "GENEID"
+)
+geneid2symbol <- AnnotationDbi::select(
+  org.Hs.eg.db, keys = unique(tx2geneid$GENEID),
+  keytype = "ENTREZID", columns = "SYMBOL"
+)
+tx2symbol <- dplyr::left_join(tx2geneid, geneid2symbol, by = c("GENEID" = "ENTREZID")) %>%
+  dplyr::filter(!is.na(SYMBOL) & !is.na(TXNAME))
+foreground_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% foreground_genes_bucket2) %>%
+  dplyr::pull(TXNAME) %>% unique()
+background_tx_names <- tx2symbol %>%
+  dplyr::filter(SYMBOL %in% background_genes) %>%
+  dplyr::pull(TXNAME) %>% unique()
+if (length(foreground_tx_names) == 0) {
+  stop("Error: None of the foreground gene symbols could be mapped to a transcript.")
+}
+message("Extracting genomic sequences...")
+utrs_foreground <- utrs[names(utrs) %in% foreground_tx_names]
+utrs_background <- utrs[names(utrs) %in% background_tx_names]
+seqs_foreground_dna <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_foreground)
+seqs_background_dna <- getSeq(BSgenome.Hsapiens.UCSC.hg38, utrs_background)
+
+
+# --- Step 4: Prepare miRNA Motifs from TargetScan ---
+message("Preparing miRNA seed region motifs from TargetScan...")
+db_path <- system.file("extdata", "targetscan.Hs.eg.sqlite", package = "targetscan.Hs.eg.db")
+con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+family_table <- DBI::dbReadTable(con, "mirna_family")
+mirbase_table <- DBI::dbReadTable(con, "mirbase")
+DBI::dbDisconnect(con)
+master_table <- dplyr::inner_join(family_table, mirbase_table, by = c("X_id" = "family"))
+mirs_filtered <- master_table %>%
+  dplyr::select(miR_Family = name, seed_m8) %>%
+  dplyr::distinct()
+mir_seeds_dna <- gsub("U", "T", mirs_filtered$seed_m8)
+names(mir_seeds_dna) <- mirs_filtered$miR_Family
+mir_seeds_dna <- mir_seeds_dna[!is.na(mir_seeds_dna)]
+message(paste("Successfully prepared", length(mir_seeds_dna), "unique miRNA motifs for analysis."))
+
+
+# --- Step 5: Find Motif Matches using Biostrings ---
+message("Scanning DNA sequences for miRNA motif matches...")
+seqs_foreground_flat <- unlist(seqs_foreground_dna)
+seqs_background_flat <- unlist(seqs_background_dna)
+
+foreground_counts_list <- lapply(mir_seeds_dna, function(seed) {
+    Biostrings::vcountPattern(pattern = seed, 
+                              subject = seqs_foreground_flat, 
+                              max.mismatch = 0)
+})
+motif_hits_foreground <- do.call(cbind, foreground_counts_list)
+
+background_counts_list <- lapply(mir_seeds_dna, function(seed) {
+    Biostrings::vcountPattern(pattern = seed, 
+                              subject = seqs_background_flat, 
+                              max.mismatch = 0)
+})
+motif_hits_background <- do.call(cbind, background_counts_list)
+
+
+# --- Step 6: Perform Enrichment Analysis for miRNAs (Bucket 2) ---
+message("Performing Fisher's exact test for enrichment...")
+final_results_miRNA_bucket2 <- tibble() 
+if (ncol(motif_hits_foreground) > 0) {
+    foreground_hits <- colSums(motif_hits_foreground > 0)
+    background_hits <- colSums(motif_hits_background > 0)
+    
+    num_foreground_seqs <- nrow(motif_hits_foreground)
+    num_background_seqs <- nrow(motif_hits_background)
+
+    fisher_results <- lapply(1:length(mir_seeds_dna), function(i) {
+        tbl <- matrix(c(
+            foreground_hits[i], background_hits[i],
+            num_foreground_seqs - foreground_hits[i],
+            num_background_seqs - background_hits[i]
+        ), nrow = 2)
+        fisher.test(tbl, alternative = "greater")
+    })
+
+    final_results_miRNA_bucket2 <- tibble(
+        miR_Family = names(mir_seeds_dna),
+        p_value = sapply(fisher_results, "[[", "p.value"),
+        odds_ratio = sapply(fisher_results, function(x) x$estimate)
+    ) %>%
+    dplyr::mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    dplyr::arrange(p_adj)
+} else {
+    warning("Motif matching returned an empty result.")
+}
+print("Top 20 enriched miRNA Families for Bucket 2:")
+print(head(final_results_miRNA_bucket2, 20))
+
+
+# --- Step 7: Visualize the Results for miRNAs (Bucket 2) ---
+
+if (nrow(final_results_miRNA_bucket2) > 0) {
+  message("Generating results dot plot for miRNAs (Bucket 2)...")
+  
+  top_motifs_plot_miRNA_bucket2 <- final_results_miRNA_bucket2 %>%
+    # Data preparation steps
+    dplyr::filter(is.finite(odds_ratio) & p_adj < 0.05) %>%
+    
+    # --- TYPO FIX HERE ---
+    dplyr::top_n(15, -p_adj) %>% # Corrected from -p-adj
+    
+    dplyr::mutate(
+      log10_padj = -log10(p_adj),
+      miR_Family = fct_reorder(miR_Family, odds_ratio) 
+    ) %>%
+    
+    # ggplot call with updated aesthetics
+    ggplot(aes(x = odds_ratio, y = miR_Family, size = odds_ratio, color = log10_padj)) +
+    geom_point(alpha = 0.8) +
+    
+    # Define the color scale
+    scale_color_gradient(low = "lightblue", high = "firebrick") +
+    
+    # Define the size scale with your specified breaks
+    # Note: You may need to adjust these breaks for the Bucket 2 data range
+    scale_size_continuous(range = c(4, 10), breaks = c(1.4, 1.6, 1.8, 2.0)) +
+    
+    # Use labs() to provide distinct titles for each legend
+    labs(
+      title = "Top 15 Enriched miRNA Motifs in Foreground Genes (Bucket 2)",
+      x = "Odds Ratio",
+      y = "miRNA Family",
+      size = "Odds Ratio",
+      color = bquote(-Log[10]~"(p-adj)")
+    ) +
+    
+    # Apply a minimal theme and remove gridlines
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  print(top_motifs_plot_miRNA_bucket2)
+  
+} else {
+  message("No significant miRNA motifs found to plot for Bucket 2.")
+}
+
+
+# --- Step 8: Print Final Summary Table for miRNAs (Bucket 2) ---
+message("--- Final Summary of Enriched miRNA Motifs (p_adj < 0.05) for Bucket 2 ---")
+if (nrow(final_results_miRNA_bucket2) > 0) {
+  
+  summary_table_miRNA_bucket2 <- final_results_miRNA_bucket2 %>%
+    dplyr::filter(p_adj < 0.05)
+  
+  if(nrow(summary_table_miRNA_bucket2) > 0){
+    print(knitr::kable(summary_table_miRNA_bucket2, digits = 3, caption = "Enriched miRNA Motifs (Bucket 2)"))
+  } else {
+    message("No motifs passed the significance threshold of p_adj < 0.05.")
+  }
+} else {
+  message("No enrichment results were generated to create a summary table.")
+}
+```
+
+
+```{r}
+# --- Step 11: Overlap Bucket 1 and Bucket 2 miRNA Results ---
+# Make sure the VennDiagram package is installed: install.packages("VennDiagram")
+library(VennDiagram)
+library(dplyr)
+library(grid) # Required for grid.newpage() and grid.draw()
+
+message("--- Comparing Enriched miRNA Families from Bucket 1 and Bucket 2 ---")
+
+# 1. Extract the unique names of significantly enriched miRNA families from each bucket
+bucket1_miRNAs <- final_results_miRNA_bucket1 %>%
+  dplyr::filter(p_adj < 0.05) %>%
+  dplyr::pull(miR_Family) %>%
+  unique()
+
+bucket2_miRNAs <- final_results_miRNA_bucket2 %>%
+  dplyr::filter(p_adj < 0.05) %>%
+  dplyr::pull(miR_Family) %>%
+  unique()
+
+# 2. Prepare the data for the Venn diagram
+venn_list_miRNA <- list(
+  "Bucket 1" = bucket1_miRNAs,
+  "Bucket 2" = bucket2_miRNAs
+)
+
+# 3. Create and draw the Venn diagram
+# This clears any previous plots
+grid.newpage() 
+
+# Generate the plot object
+# Load the necessary library
+library(VennDiagram)
+
+# Your list of items for the Venn diagram
+# venn_list_miRNA <- list(Bucket1 = ..., Bucket2 = ...)
+
+# --- Corrected Plotting Code ---
+venn.diagram(
+  x = venn_list_miRNA,
+  
+  # 1. Set a filename
+  filename = 'venn_plot.png',
+  output = TRUE,
+  
+  # 2. Set equal width and height for a square canvas
+  imagetype="png" ,
+  height = 2000, 
+  width = 2000, 
+  resolution = 300,
+  compression = "lzw",
+  
+  # --- Style Options ---
+  col = c("seagreen", "darkorange"),
+  fill = c(alpha("seagreen", 0.3), alpha("darkorange", 0.3)),
+  cex = 1.5,
+  fontfamily = "sans",
+  cat.cex = 1.2,
+  cat.fontfamily = "sans",
+  cat.col = c("seagreen", "darkorange")
+)
+
+# Draw the plot to the active graphics device
+grid.draw(venn_plot_miRNA)
+
+
+# 4. List the common and unique miRNA families
+common_miRNAs <- intersect(bucket1_miRNAs, bucket2_miRNAs)
+unique_to_bucket1_miRNAs <- setdiff(bucket1_miRNAs, bucket2_miRNAs)
+unique_to_bucket2_miRNAs <- setdiff(bucket2_miRNAs, bucket1_miRNAs)
+
+cat("\n--- Summary of miRNA Overlap ---\n")
+cat("\nmiRNA Families common to BOTH buckets:", paste(common_miRNAs, collapse=", "), "\n")
+cat("\nmiRNA Families unique to Bucket 1:", paste(unique_to_bucket1_miRNAs, collapse=", "), "\n")
+cat("\nmiRNA Families unique to Bucket 2:", paste(unique_to_bucket2_miRNAs, collapse=", "), "\n")
+```
+
+```{r}
+# --- Step 11: Overlap Bucket 1 and Bucket 2 miRNA Results ---
+
+# --- MODIFIED LIBRARIES ---
+# Make sure the eulerr package is installed: install.packages("eulerr")
+library(eulerr)     # For plotting area-proportional Euler diagrams
+library(grid)       # For drawing the plot grob
+library(dplyr)
+
+message("--- Comparing Enriched miRNA Families from Bucket 1 and Bucket 2 ---")
+
+# --- Pre-flight Check ---
+# Ensure the necessary result tables exist
+if (exists("final_results_miRNA_bucket1") && exists("final_results_miRNA_bucket2")) {
+
+  # 1. Extract the unique names of significantly enriched miRNA families from each bucket
+  bucket1_miRNAs <- final_results_miRNA_bucket1 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(miR_Family) %>%
+    unique()
+
+  bucket2_miRNAs <- final_results_miRNA_bucket2 %>%
+    dplyr::filter(p_adj < 0.05) %>%
+    dplyr::pull(miR_Family) %>%
+    unique()
+    
+  message(paste("Found", length(bucket1_miRNAs), "significant families in Bucket 1."))
+  message(paste("Found", length(bucket2_miRNAs), "significant families in Bucket 2."))
+
+  # 2. Prepare the data for the Euler diagram
+  venn_list_miRNA <- list(
+    "Bucket 1" = bucket1_miRNAs,
+    "Bucket 2" = bucket2_miRNAs
+  )
+
+  # --- MODIFIED PLOTTING STEP ---
+  # 3. Create and draw the Euler diagram
+  message("\n--- Generating Euler Diagram ---")
+  grid.newpage() # Clear the plot device
+  
+  # Create the euler plot object
+  # quantities = TRUE adds the numbers to the segments
+  euler_plot_grob <- plot(euler(venn_list_miRNA), quantities = TRUE)
+  
+  # Draw the plot to the graphics device
+  grid.draw(euler_plot_grob)
+  # --- END OF PLOTTING MODIFICATION ---
+
+
+  # 4. List the common and unique miRNA families
+  common_miRNAs <- intersect(bucket1_miRNAs, bucket2_miRNAs)
+  unique_to_bucket1_miRNAs <- setdiff(bucket1_miRNAs, bucket2_miRNAs)
+  unique_to_bucket2_miRNAs <- setdiff(bucket2_miRNAs, bucket1_miRNAs)
+
+  cat("\n--- Summary of miRNA Overlap ---\n")
+  cat("Total overlapping families:", length(common_miRNAs), "\n")
+  cat("\nFamilies common to BOTH buckets:", paste(common_miRNAs, collapse=", "), "\n")
+  cat("\nFamilies unique to Bucket 1:", paste(unique_to_bucket1_miRNAs, collapse=", "), "\n")
+  cat("\nFamilies unique to Bucket 2:", paste(unique_to_bucket2_miRNAs, collapse=", "), "\n")
+  
+  
+  # --- NEW STATISTICAL ANALYSIS STEP ---
+  # 5. Perform the Hypergeometric Test
+  message("\n--- Calculating Statistical Significance of Overlap ---")
+  
+  # --- Define the Statistical Universe ---
+  # We define the universe as all unique miRNA families present in EITHER 
+  # of the full (unfiltered) results tables. This represents all families
+  # that were tested and could have been found significant.
+  
+  all_b1_families <- unique(final_results_miRNA_bucket1$miR_Family)
+  all_b2_families <- unique(final_results_miRNA_bucket2$miR_Family)
+  total_mirna_universe <- union(all_b1_families, all_b2_families)
+  
+  if(length(total_mirna_universe) == 0) {
+    message("Error: Universe size is zero. Cannot perform hypergeometric test.")
+  } else {
+    message(paste("Statistical universe defined as all families tested:", length(total_mirna_universe)))
+
+    # Define the four numbers for the test:
+    q <- length(common_miRNAs) # Overlap
+    m <- length(bucket1_miRNAs) # Size of List 1 (significant in B1)
+    k <- length(bucket2_miRNAs) # Size of List 2 (significant in B2)
+    n <- length(total_mirna_universe) - m # All non-List 1 items in universe
+
+    # Calculate the p-value for the overlap
+    p_value <- phyper(q - 1, m, n, k, lower.tail = FALSE)
+
+    cat("--- Test Parameters --- \n")
+    cat("Overlap size (q):", q, "\n")
+    cat("Size of List 1 'm' (Bucket 1):", m, "\n")
+    cat("Size of List 2 'k' (Bucket 2):", k, "\n")
+    cat("Size of Universe 'm+n':", m + n, "\n")
+    cat("---------------------- \n")
+    cat("Hypergeometric test p-value:", format.pval(p_value, digits = 3), "\n")
+
+    if (p_value < 0.05) {
+      cat("Result: The overlap between Bucket 1 and Bucket 2 enriched miRNA families is STATISTICALLY SIGNIFICANT.\n")
+    } else {
+      cat("Result: The overlap is NOT statistically significant.\n")
+    }
+  }
+  
+} else {
+  message("Error: 'final_results_miRNA_bucket1' or 'final_results_miRNA_bucket2' not found. Cannot perform overlap analysis.")
+}
+```
+
+
+
+Export results from ridgeline plots
+```{r}
+# Load necessary library
+library(openxlsx)
+library(dplyr)
+
+# ==============================================================================
+# EXPORT: AVERAGED TRIPLICATES 
+# ==============================================================================
+
+# 1. Prepare and Combine Raw Data
+mgh_ratio_data$Background <- "MGH"
+h8330_ratio_data$Background <- "8330"
+
+raw_combined <- rbind(mgh_ratio_data, h8330_ratio_data)
+
+# 2. Average the Triplicates
+# We group by Gene, Background, and Genotype to calculate the mean across replicates
+averaged_table <- raw_combined %>%
+  group_by(Gene, Background, condition) %>%
+  summarise(
+    Mean_Protein_Abundance_Log2 = mean(Protein_Abundance, na.rm = TRUE),
+    Mean_RNA_Abundance_VST = mean(RNA_Abundance, na.rm = TRUE),
+    Mean_Protein_RNA_Log2_Ratio = mean(Log2Ratio, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(condition, Background, Gene) # Sort for clarity
+
+# 3. Initialize Workbook
+wb <- createWorkbook()
+header_style <- createStyle(textDecoration = "bold", halign = "center")
+
+# 4. Loop Logic: Create sheets for Genotype + Background combinations
+unique_genotypes <- unique(averaged_table$condition)
+unique_backgrounds <- c("MGH", "8330")
+
+for (geno in unique_genotypes) {
+  for (bg in unique_backgrounds) {
+    
+    # A. Filter data for this specific Genotype AND Background
+    sheet_data <- averaged_table %>% 
+      filter(condition == geno, Background == bg) %>%
+      dplyr::select(-condition, -Background) 
+    
+    if(nrow(sheet_data) > 0) {
+      
+      sheet_name <- paste0(geno, "_", bg)
+      
+      sheet_name <- substr(sheet_name, 1, 31)
+      
+      addWorksheet(wb, sheet_name)
+      
+      writeData(wb, sheet = sheet_name, x = sheet_data)
+      
+      addStyle(wb, sheet = sheet_name, style = header_style, rows = 1, cols = 1:ncol(sheet_data))
+      setColWidths(wb, sheet = sheet_name, cols = 1:ncol(sheet_data), widths = "auto")
+    }
+  }
+}
+
+# 5. Save
+saveWorkbook(wb, "Supplementary_Table_Protein_RNA_Ratios_Averaged.xlsx", overwrite = TRUE)
+
+cat("\nSuccess! 'Supplementary_Table_Protein_RNA_Ratios_Averaged.xlsx' created.")
+cat("\nTriplicates have been averaged. Sheets are organized by Genotype_Background.")
+```
+
+
+Export lists of bucket 1 and 2
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)
+
+# ==============================================================================
+# EXPORT: OVERLAPPING PROTEOME-SPECIFIC GENES (SIMPLE LIST)
+# ==============================================================================
+
+# --- 1. Define Bucket 1 (UP) Intersection ---
+# Filter all genes fitting the criteria
+bucket1_all <- master_integrated_table %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC > 0,
+    !(mRNA_padj < 0.05 & mRNA_Log2FC > 0)
+  )
+
+# Split by comparison and find the intersection (genes present in ALL lists)
+bucket1_list <- bucket1_all %>% group_split(comparison)
+bucket1_vectors <- lapply(bucket1_list, function(df) df$Gene)
+bucket1_overlap <- Reduce(intersect, bucket1_vectors)
+
+# --- 2. Define Bucket 2 (DOWN) Intersection ---
+# Filter all genes fitting the criteria
+bucket2_all <- master_integrated_table %>%
+  dplyr::filter(
+    Protein_padj < 0.05 & Protein_Log2FC < 0,
+    !(mRNA_padj < 0.05 & mRNA_Log2FC < 0)
+  )
+
+# Split by comparison and find the intersection
+bucket2_list <- bucket2_all %>% group_split(comparison)
+bucket2_vectors <- lapply(bucket2_list, function(df) df$Gene)
+bucket2_overlap <- Reduce(intersect, bucket2_vectors)
+
+# --- 3. Prepare Data Frames for Export ---
+# Convert the vectors to dataframes so they can be written to Excel
+df_bucket1 <- data.frame(Gene = bucket1_overlap)
+df_bucket2 <- data.frame(Gene = bucket2_overlap)
+
+# --- 4. Create and Save Excel File ---
+wb <- createWorkbook()
+header_style <- createStyle(textDecoration = "bold", halign = "center")
+
+# Sheet 1: Proteome-Spec Upregulation
+sheet1 <- "Proteome-Spec Upregulation"
+addWorksheet(wb, sheet1)
+writeData(wb, sheet1, df_bucket1)
+addStyle(wb, sheet1, header_style, rows = 1, cols = 1)
+
+# Sheet 2: Proteome-Spec Downregulation
+sheet2 <- "Proteome-Spec Downregulation"
+addWorksheet(wb, sheet2)
+writeData(wb, sheet2, df_bucket2)
+addStyle(wb, sheet2, header_style, rows = 1, cols = 1)
+
+# Save
+saveWorkbook(wb, "Supplementary_Table_Core_Proteome_Discordance.xlsx", overwrite = TRUE)
+
+cat("\nSuccess! 'Supplementary_Table_Core_Proteome_Discordance.xlsx' created.")
+cat("\nProteome-Specific UP Genes (Intersection):", length(bucket1_overlap))
+cat("\nProteome-Specific DOWN Genes (Intersection):", length(bucket2_overlap))
+```
+
+
+```{r}
+# --- Step 2: Convert Gene Symbols to Entrez IDs ---
+foreground_genes_bucket1_entrez <- bitr(
+  foreground_genes_bucket1, 
+  fromType = "SYMBOL", 
+  toType = "ENTREZID", 
+  OrgDb = "org.Hs.eg.db"
+)
+
+# Check the conversion
+print(head(foreground_genes_bucket1_entrez))
+
+# --- Step 3: Run GO Enrichment Analysis ---
+bucket2_enrich <- enrichGO(
+  gene          = foreground_genes_bucket1_entrez$ENTREZID,  # <--- FIX: Select the column
+  keyType       = "ENTREZID",
+  OrgDb         = org.Hs.eg.db,
+  ont           = "ALL",        # Runs BP, CC, and MF. Use "BP" for just Biological Process.
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE          # Maps IDs back to Symbols in the output
+)
+
+# --- Step 4: View Results ---
+if (!is.null(bucket1_enrich)) {
+  print(head(bucket1_enrich))
+} else {
+  print("No significant GO terms found. Try increasing pvalueCutoff to 0.1 or 0.2 to check for weak signal.")
+}
+```
+
+
+
+```{r}
+# --- Step 2: Convert Gene Symbols to Entrez IDs ---
+foreground_genes_bucket2_entrez <- bitr(
+  foreground_genes_bucket2, 
+  fromType = "SYMBOL", 
+  toType = "ENTREZID", 
+  OrgDb = "org.Hs.eg.db"
+)
+
+# Check the conversion
+print(head(foreground_genes_bucket2_entrez))
+
+# --- Step 3: Run GO Enrichment Analysis ---
+bucket2_enrich <- enrichGO(
+  gene          = foreground_genes_bucket2_entrez$ENTREZID,  # <--- FIX: Select the column
+  keyType       = "ENTREZID",
+  OrgDb         = org.Hs.eg.db,
+  ont           = "ALL",        # Runs BP, CC, and MF. Use "BP" for just Biological Process.
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE          # Maps IDs back to Symbols in the output
+)
+
+# --- Step 4: View Results ---
+if (!is.null(bucket2_enrich)) {
+  print(head(bucket2_enrich))
+} else {
+  print("No significant GO terms found. Try increasing pvalueCutoff to 0.1 or 0.2 to check for weak signal.")
+}
+```
+
+
+
+Heatmap of RBP-enriched proteins
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(pheatmap)
+  library(RColorBrewer)
+})
+
+# ----------------------------
+# 0) Inputs
+# ----------------------------
+se_mgh  <- data_imp_MGH_new
+se_8330 <- data_imp_8330_new
+
+proteins_to_plot <- c(
+  "GLYR1","CHD2","ACO1","RPL35","HSPA5","HNRNPAO","AHCTF1","RBBP5",
+  "R3HDM2","SND1","TSNAX","RAN","RFC3","NELFB","PSMC2","CEBPZ"
+)
+
+# ----------------------------
+# Helpers
+# ----------------------------
+unwrap_se <- function(x) {
+  if (inherits(x, "SummarizedExperiment")) return(x)
+  if (is.list(x)) {
+    idx <- which(vapply(x, inherits, logical(1), what="SummarizedExperiment"))[1]
+    if (!is.na(idx)) return(x[[idx]])
+  }
+  stop("Could not unwrap into SummarizedExperiment")
+}
+
+get_assay_matrix <- function(se) {
+  se <- unwrap_se(se)
+
+  an <- assayNames(se)
+  if (length(an) == 0) {
+    mat <- assay(se, 1)
+  } else {
+    preferred <- c("imputed","Imputed","log2","intensity","abundance","exprs","counts")
+    use <- preferred[preferred %in% an]
+    if (length(use) == 0) use <- an[1] else use <- use[1]
+    mat <- assay(se, use)
+  }
+  mat <- as.matrix(mat)
+  mode(mat) <- "numeric"
+  mat
+}
+
+get_symbol_map <- function(se) {
+  se <- unwrap_se(se)
+  rd <- as.data.frame(rowData(se))
+
+  candidate_symbol_cols <- c("name","Gene","gene","gene_name","SYMBOL","Symbol","Protein","protein","PG.Genes")
+  symbol_col <- candidate_symbol_cols[candidate_symbol_cols %in% colnames(rd)][1]
+
+  sym <- if (!is.na(symbol_col)) as.character(rd[[symbol_col]]) else rownames(se)
+
+  m <- setNames(seq_along(sym), sym)
+  m <- m[!duplicated(names(m))]
+  m
+}
+
+cal_z_row <- function(mat) t(scale(t(mat)))
+
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# ----------------------------
+# 1) Extract matrices and subset proteins
+# ----------------------------
+se_mgh  <- unwrap_se(se_mgh)
+se_8330 <- unwrap_se(se_8330)
+
+mat_mgh_raw  <- get_assay_matrix(se_mgh)
+mat_8330_raw <- get_assay_matrix(se_8330)
+
+map_mgh  <- get_symbol_map(se_mgh)
+map_8330 <- get_symbol_map(se_8330)
+
+valid_proteins <- intersect(proteins_to_plot, intersect(names(map_mgh), names(map_8330)))
+if (length(valid_proteins) < 2) stop("Fewer than 2 proteins found in BOTH backgrounds.")
+
+mat_mgh_sub  <- mat_mgh_raw[ unname(map_mgh[valid_proteins]),  , drop=FALSE]
+mat_8330_sub <- mat_8330_raw[unname(map_8330[valid_proteins]), , drop=FALSE]
+
+rownames(mat_mgh_sub)  <- valid_proteins
+rownames(mat_8330_sub) <- valid_proteins
+
+# ----------------------------
+# 2) IMPORTANT FIX: make sample names unique BEFORE combining
+# ----------------------------
+colnames(mat_mgh_sub)  <- paste0("MGH_",  colnames(mat_mgh_sub))
+colnames(mat_8330_sub) <- paste0("8330_", colnames(mat_8330_sub))
+
+# ----------------------------
+# 3) Z-score separately by background, recombine
+# ----------------------------
+z_mgh  <- cal_z_row(mat_mgh_sub)
+z_8330 <- cal_z_row(mat_8330_sub)
+z_matrix_combined <- cbind(z_mgh, z_8330)
+
+# ----------------------------
+# 4) Column annotations (genotype/condition + background) and sorting
+# ----------------------------
+col_anno_mgh  <- as.data.frame(colData(se_mgh))
+col_anno_8330 <- as.data.frame(colData(se_8330))
+
+# rownames must match the NEW prefixed sample names
+rownames(col_anno_mgh)  <- colnames(z_mgh)   # MGH_* names
+rownames(col_anno_8330) <- colnames(z_8330)  # 8330_* names
+
+col_anno_mgh$background  <- "MGH"
+col_anno_8330$background <- "8330"
+
+# your "genotype" is stored as condition
+col_anno_mgh$genotype  <- as.character(col_anno_mgh$condition)
+col_anno_8330$genotype <- as.character(col_anno_8330$condition)
+
+col_annotation_all <- rbind(col_anno_mgh, col_anno_8330)
+col_annotation_all <- col_annotation_all[colnames(z_matrix_combined), , drop=FALSE]
+
+# strict factor levels (same as your RNA heatmap)
+col_annotation_all$genotype <- factor(
+  col_annotation_all$genotype,
+  levels = c("DelC","DupC","HetDel","HomoDel","PWSTI","PWSTII","WT")
+)
+col_annotation_all$background <- factor(
+  col_annotation_all$background,
+  levels = c("MGH","8330")
+)
+
+# sort columns genotype -> background (same style)
+col_annotation_sorted <- col_annotation_all[
+  order(col_annotation_all$genotype, col_annotation_all$background), , drop=FALSE
+]
+ordered_samples <- rownames(col_annotation_sorted)
+
+# final matrix in sorted order
+heatmap_matrix_final <- z_matrix_combined[, ordered_samples, drop=FALSE]
+
+# ----------------------------
+# 5) Colors + pheatmap (match your RNA style)
+# ----------------------------
+genotype_colors <- setNames(
+  gg_color_hue(length(levels(col_annotation_sorted$genotype))),
+  levels(col_annotation_sorted$genotype)
+)
+background_colors <- setNames(
+  gg_color_hue(length(levels(col_annotation_sorted$background))),
+  levels(col_annotation_sorted$background)
+)
+ann_colors_final <- list(
+  genotype = genotype_colors,
+  background = background_colors
+)
+
+pheatmap(
+  heatmap_matrix_final,
+
+  annotation_col = col_annotation_sorted[, c("genotype","background"), drop=FALSE],
+  annotation_colors = ann_colors_final,
+
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize_row = 8,
+  fontsize_col = 8,
+
+  color = colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100),
+  main = "Proteomics (MGH + 8330): Selected Proteins (Z-score by Background)",
+  scale = "none",
+  breaks = seq(-2, 2, length.out = 101),
+  border_color = NA
+)
+```
+

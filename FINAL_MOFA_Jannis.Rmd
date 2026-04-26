@@ -1,0 +1,1421 @@
+---
+title: "MOFA_MAGEL2"
+output: html_document
+date: "2025-02-04"
+---
+
+Loading the libraries and reading the preprocessed MOFA File
+
+```{r}
+library("MOFAdata")
+library("MOFA2")
+library("biomaRt")
+library("ggplot2")
+library("data.table")
+library("dplyr")
+library("gprofiler2")
+library("ggplot2")
+library("viridis") 
+library("tidyr")   
+library("tibble") 
+library("RColorBrewer")
+library("stringr") 
+library("forcats")
+library("grid")
+
+MOFA_out<- readRDS("./MOFA_PRU3.rds") 
+MOFA_out@samples_metadata$group <- gsub("[1-3]", "", MOFA_out@samples_metadata$sample)
+MOFA_out@samples_metadata$group <- as.factor(MOFA_out@samples_metadata$group)
+model <- MOFA_out
+
+```
+
+Overview & Variance Plots
+
+```{r}
+plot_data_overview(MOFA_out)
+
+plot_variance_explained(MOFA_out, x="view", y="factor")
+plot_variance_explained(MOFA_out, x="group", y="factor", plot_total = T)[[2]]   + theme(axis.text.x = element_text(angle = 45,hjust = 1),
+        text = element_text(size = 16))
+
+plot_factors(MOFA_out, 
+  factors = 1:5,
+  color_by = "group"
+)
+
+```
+
+Plotting all samples based on the 15 factors
+
+```{r}
+# Load ggplot2 if it's not already loaded
+library(ggplot2)
+
+plot_factor(MOFA_out,
+  factor = 1:15,
+  color_by = "group",
+  dot_size = 0 # Make the original points invisible
+) +
+  # Add a new layer of points with your desired settings
+  geom_point(size = 4, alpha = 0.7, stroke = 0) +
+  theme(
+    axis.text.x = element_blank(),  # hides x-axis labels
+    axis.ticks.x = element_blank(), # optionally hide x-axis ticks too
+    text = element_text(size = 14)
+  )
+
+
+```
+
+
+```{r}
+# --- 1. Load necessary libraries ---
+library(MOFA2)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+
+# --- 2. Helper function to get colors ---
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+# --- 4. Prepare MOFA Metadata (Copied from your app) ---
+# This adds the "Mutation" and "Background" columns needed for plotting
+MOFA_out@samples_metadata <- MOFA_out@samples_metadata %>%
+  mutate(
+    Background = str_extract(sample, "(?<=_)(8330|MGH)"),
+    Background = factor(Background),
+    MutationPrefix = str_extract(sample, "^[A-Za-z]+"),
+    Mutation = case_when(
+      MutationPrefix == "WT" ~ "WT",
+      MutationPrefix == "DelC" ~ "DelC",
+      MutationPrefix == "DupC" ~ "DupC",
+      MutationPrefix == "HetDel" ~ "HetDel",
+      MutationPrefix == "HomoDel" ~ "HomoDel",
+      MutationPrefix == "PWSTI" ~ "PWSTI",
+      MutationPrefix == "PWSTII" ~ "PWSTII",
+      TRUE ~ MutationPrefix
+    ),
+    Mutation = factor(Mutation, levels = c("DelC", "DupC", "HetDel", "HomoDel", "PWSTI", "PWSTII", "WT")),
+    Mutation_BG = paste0(Mutation, "_", Background)
+  ) %>%
+  mutate(group = Mutation) %>%
+  dplyr::select(-MutationPrefix)
+
+# --- 5. Prepare data for plotting (from the app) ---
+factors_df <- get_factors(MOFA_out, factors = 1:15, as.data.frame = TRUE)
+meta_df <- samples_metadata(MOFA_out)
+plot_df <- left_join(factors_df, meta_df, by = "sample")
+
+# --- 6. Define Colors for 'Mutation' (Genotype) ---
+mutation_levels <- levels(plot_df$Mutation)
+mutation_colors <- gg_color_hue(length(mutation_levels))
+names(mutation_colors) <- mutation_levels
+
+# --- 7. Generate the Final Plot ---
+# This is the plotting code from the app, with your changes applied
+final_plot <- ggplot(plot_df, aes(x = factor, y = value,
+                                 fill = Mutation,    # Map fill to Mutation
+                                 color = Mutation,   # Map color to Mutation (to remove outline)
+                                 shape = Background)) +
+  geom_vline(xintercept = 1:14 + 0.5, linetype = "dashed", color = "grey70") +
+  
+  # Use stroke = 0 to remove point outlines
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8),
+             size = 3, alpha = 0.8, stroke = 0) +
+  
+  # Use shapes 25 (triangle down) and 21 (circle)
+  scale_shape_manual(name = "Background", values = c("8330" = 25, "MGH" = 21)) +
+  
+  # Add matching fill and color scales
+  scale_fill_manual(name = "Genotype", values = mutation_colors) +
+  scale_color_manual(name = "Genotype", values = mutation_colors, guide = "none") +
+  
+  # Add the rest of the theme from the app
+  labs(x = "Factor", y = "Factor Value") +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    text = element_text(size = 14, color = "#545252"),
+    axis.text = element_text(color = "#545252"),
+    legend.position = "top"
+  )
+
+# --- 8. Display the plot ---
+print(final_plot)
+```
+
+
+
+Correlation between the factors
+
+```{r}
+
+# --- Flipped Correlation Heatmap with Circles (RdBu Palette) ---
+
+# 1. Load the required libraries
+library(corrplot)
+library(RColorBrewer) # Added for brewer.pal()
+
+# 2. Get the correlation matrix (same as before)
+factor_list <- get_factors(MOFA_out, groups = "all")
+all_factors_matrix <- do.call(rbind, factor_list)
+factor_cor_matrix <- cor(all_factors_matrix)
+
+# 3. Define the color palette exactly as you requested
+#    (This is a diverging blue-to-red palette)
+my_colors <- colorRampPalette(rev(brewer.pal(n = 10, name = "RdBu")))(100)
+
+# 4. Plot using corrplot
+corrplot(
+  factor_cor_matrix,
+  method = "circle",      # Use circles
+  col = my_colors,        # Use your specified palette
+  order = "original",     # Keep the 1-15 order
+  is.corr = TRUE,
+  tl.col = "black",       # Color of text labels
+  tl.srt = 45,            # Rotate text labels
+  cl.lim = c(-1, 1)       # Enforce the color limit from -1 to 1
+)
+
+
+# --- Plot for Factor 1 (from your original code) ---
+
+plot_factor(MOFA_out, 
+  factors = 1, 
+  color_by = "group") +
+theme(axis.text.x = element_text(angle = 45,hjust = 1),
+      text = element_text(size = 16))
+```
+
+
+UMAP
+```{r}
+# Load necessary libraries
+library(MOFA2)
+library(ggplot2)
+library(stringr)
+library(dplyr)
+library(ggExtra) # Added for marginal plots
+
+# Helper function to generate the default ggplot2 color palette
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# --- 1. Ensure Metadata and UMAP are prepared ----
+
+# Ensure sample names are in rownames for easy merging later
+stopifnot("sample" %in% colnames(MOFA_out@samples_metadata))
+rownames(MOFA_out@samples_metadata) <- MOFA_out@samples_metadata$sample
+
+# Run UMAP if it hasn't been run already
+if (!"UMAP" %in% names(MOFA_out@dim_red)) {
+  set.seed(42) # for reproducibility
+  MOFA_out <- run_umap(MOFA_out)
+}
+
+# --- 2. Create the Data Frame for Plotting ----
+
+# Extract only the UMAP coordinate columns
+umap_coords <- as.data.frame(MOFA_out@dim_red$UMAP) %>%
+  dplyr::select(UMAP1, UMAP2)
+
+# Align metadata to the UMAP coordinates using the robust rownames
+metadata_aligned <- MOFA_out@samples_metadata[rownames(umap_coords), , drop = FALSE]
+
+# Combine coordinates and metadata, and create clean 'Background' and 'Mutation' columns
+plot_df <- cbind(umap_coords, metadata_aligned) %>%
+  mutate(
+    Background = factor(case_when(
+      str_detect(group, "_80$") ~ "8330", # Using 8330 for clarity
+      str_detect(group, "_MGH$") ~ "MGH",
+      TRUE ~ "Unknown"
+    )),
+    Mutation = factor(str_replace(group, "_(80|MGH)$", ""))
+  )
+
+# --- 3. Generate the Base UMAP Plot ----
+# (Note: Renamed to 'p_umap_base' and removed the print() command)
+
+# Define colors for the Mutation types
+mutation_levels <- levels(plot_df$Mutation)
+mutation_colors <- gg_color_hue(length(mutation_levels))
+names(mutation_colors) <- mutation_levels
+
+# Create the base plot object
+p_umap_base <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, fill = Mutation, color = Mutation, shape = Background)) +
+  geom_point(size = 3.5, alpha = 0.8) +
+  
+  # This scale creates the color legend for "Mutation"
+  scale_fill_manual(name = "Mutation", values = mutation_colors) +
+  
+  # This scale matches the outlines but hides its own legend
+  scale_color_manual(name = "Mutation", values = mutation_colors, guide = "none") +
+  
+  # This scale defines the shapes
+  scale_shape_manual(name = "Background", values = c("8330" = 25, "MGH" = 21, "Unknown" = 4)) +
+  
+  labs(
+    title = "UMAP of MOFA Factors",
+    subtitle = "Colored by Mutation, Shaped by Background"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "right",
+    panel.grid = element_blank() # Remove grid lines
+  )
+
+# --- 4. Add Marginal Densities and Display ----
+message("--- Generating MOFA UMAP with Marginal Densities ---")
+
+# Use ggMarginal to add density plots
+# It will use the 'color = Mutation' mapping for grouping
+umap_marginal_plot <- ggMarginal(
+  p_umap_base,
+  type = "density",
+  groupColour = TRUE, # Use the 'color = Mutation' mapping
+  groupFill = TRUE,   # Fill the densities based on the same group
+  alpha = 0.4         # Set transparency
+)
+
+# Display the final plot
+print(umap_marginal_plot)
+```
+
+
+
+
+
+Plotting the top weights for each factor
+
+```{r}
+plot_top_weights(MOFA_out,
+ view = "RNA",
+ factor = 1:5,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+plot_weights(MOFA_out,
+ view = "RNA",
+ factor = 1:5,
+ nfeatures = 5,     # Top number of features to highlight
+ scale = T, 
+ text_size = 3 # Scale weights from -1 to 1
+)
+
+plot_top_weights(MOFA_out,
+ view = "protein",
+ factor = 1:5,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+plot_weights(MOFA_out,
+ view = "protein",
+ factor = 1:5,
+ nfeatures = 5,     # Top number of features to highlight
+ scale = T, 
+ text_size = 3 # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFA_out,
+ view = "Ubiq",
+ factor = 1:5,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+plot_weights(MOFA_out,
+ view = "Ubiq",
+ factor = 1:5,
+ nfeatures = 5,     # Top number of features to highlight
+ scale = T, 
+ text_size = 3 # Scale weights from -1 to 1
+)
+
+```
+
+Heatmap of the most prominent features in Factor 1
+
+```{r}
+
+TARGET_FACTOR <- 1
+N_FEATURES <- 25 
+
+# Aesthetic parameters
+COLOR_BREAKS_MIN <- -2
+COLOR_BREAKS_MAX <- 2
+ROW_LABEL_WIDTH <- 15 
+
+color_palette <- colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100)
+color_breaks <- seq(COLOR_BREAKS_MIN, COLOR_BREAKS_MAX, length.out = 101)
+
+
+
+### --- RNA View --- ###
+
+# Get top features for this view
+rna_weights <- get_weights(MOFA_out, views = "RNA", factors = TARGET_FACTOR)[[1]]
+rna_top_features <- names(sort(abs(rna_weights[, 1]), decreasing = TRUE)) %>% head(N_FEATURES)
+
+# Create truncated labels for displaying on the plot
+rna_truncated_labels <- str_trunc(rna_top_features, width = ROW_LABEL_WIDTH, side = "right")
+
+# Generate the plot
+plot_data_heatmap(
+  MOFA_out,
+  view = "RNA",
+  factor = TARGET_FACTOR,
+  features = rna_top_features, 
+  denoise = TRUE,
+  cluster_rows = TRUE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = TRUE,
+  scale = "row",
+  main = paste("Top", N_FEATURES, "RNA Features (Factor", TARGET_FACTOR, ")"),
+  color = color_palette,
+  breaks = color_breaks,
+  labels_row = rna_truncated_labels
+)
+
+
+### --- Protein View --- ###
+
+# Get top features for this view
+protein_weights <- get_weights(MOFA_out, views = "protein", factors = TARGET_FACTOR)[[1]]
+protein_top_features <- names(sort(abs(protein_weights[, 1]), decreasing = TRUE)) %>% head(N_FEATURES)
+
+# Create truncated labels for displaying on the plot
+protein_truncated_labels <- str_trunc(protein_top_features, width = ROW_LABEL_WIDTH, side = "right")
+
+# Generate the plot
+plot_data_heatmap(
+  MOFA_out,
+  view = "protein",
+  factor = TARGET_FACTOR,
+  features = protein_top_features, 
+  denoise = TRUE,
+  cluster_rows = TRUE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = TRUE,
+  scale = "row",
+  main = paste("Top", N_FEATURES, "Protein Features (Factor", TARGET_FACTOR, ")"),
+  color = color_palette,
+  breaks = color_breaks,
+  labels_row = protein_truncated_labels 
+)
+
+
+### --- Ubiquitination View --- ###
+
+# Get top features for this view
+ubiq_weights <- get_weights(MOFA_out, views = "Ubiq", factors = TARGET_FACTOR)[[1]]
+ubiq_top_features <- names(sort(abs(ubiq_weights[, 1]), decreasing = TRUE)) %>% head(N_FEATURES)
+
+# Create truncated labels for displaying on the plot
+ubiq_truncated_labels <- str_trunc(ubiq_top_features, width = ROW_LABEL_WIDTH, side = "right")
+
+# Generate the plot
+plot_data_heatmap(
+  MOFA_out,
+  view = "Ubiq",
+  factor = TARGET_FACTOR,
+  features = ubiq_top_features, 
+  denoise = TRUE,
+  cluster_rows = TRUE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = TRUE,
+  scale = "row",
+  main = paste("Top", N_FEATURES, "Ubiq Features (Factor", TARGET_FACTOR, ")"),
+  color = color_palette,
+  breaks = color_breaks,
+  labels_row = ubiq_truncated_labels 
+)
+
+
+```
+
+Running GSEA for all positive and negative weights on RNA, Protein and Ubi
+
+```{r}
+utils::data(MSigDB_v6.0_C5_human)
+
+data("MSigDB_v6.0_C5_human")
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+conversion <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = colnames(MSigDB_v6.0_C5_human),
+  mart = mart
+)
+
+valid_conversion <- conversion[!is.na(conversion$hgnc_symbol) & conversion$hgnc_symbol != "", ]
+common_ensembl_ids <- intersect(colnames(MSigDB_v6.0_C5_human), valid_conversion$ensembl_gene_id)
+MSigDB_subset <- MSigDB_v6.0_C5_human[, common_ensembl_ids]
+
+# Re-run conversion filtering to match the subsetted MSigDB object
+valid_conversion_subset <- valid_conversion[valid_conversion$ensembl_gene_id %in% common_ensembl_ids, ]
+# Ensure the order of conversion matches the order of columns in MSigDB_subset
+conversion_ordered <- valid_conversion_subset[match(colnames(MSigDB_subset), valid_conversion_subset$ensembl_gene_id), ]
+
+# Rename columns
+colnames(MSigDB_subset) <- conversion_ordered$hgnc_symbol
+MSigDB_v6.0_C5_human_renamed <- MSigDB_subset
+
+MSigDB_v6.0_C5_human_RNA <- MSigDB_v6.0_C5_human_renamed
+MSigDB_v6.0_C5_human_Protein <- MSigDB_v6.0_C5_human_renamed
+MSigDB_v6.0_C5_human_Ubiq <- MSigDB_v6.0_C5_human_renamed
+
+colnames(MSigDB_v6.0_C5_human_RNA) <- paste(colnames(MSigDB_v6.0_C5_human_RNA), "RNA", sep = "_")
+colnames(MSigDB_v6.0_C5_human_Protein) <- paste(colnames(MSigDB_v6.0_C5_human_Protein), "protein", sep = "_")
+colnames(MSigDB_v6.0_C5_human_Ubiq) <- paste(colnames(MSigDB_v6.0_C5_human_Ubiq), "ubiq", sep = "_")
+
+
+# --- Run GSEA for positive weights 
+res.positive_RNA <- run_enrichment(MOFA_out ,
+  feature.sets = MSigDB_v6.0_C5_human_RNA,
+  view = "RNA",
+  factors = 1:10,
+  sign = "positive",
+  verbose = TRUE
+)
+
+res.positive_Protein  <- run_enrichment(MOFA_out,
+  feature.sets = MSigDB_v6.0_C5_human_Protein,
+  view = "protein",
+  factors = 1:10,
+  sign = "positive",
+  verbose = TRUE
+)
+
+res.positive_Ubiq  <- run_enrichment(MOFA_out,
+  feature.sets = MSigDB_v6.0_C5_human_Ubiq,
+  view = "Ubiq", 
+  factors = 1:10,
+  sign = "positive",
+  verbose = TRUE
+)
+
+
+
+# --- Run GSEA for negative weights 
+res.negative_RNA <- run_enrichment(MOFA_out ,
+  feature.sets = MSigDB_v6.0_C5_human_RNA,
+  view = "RNA",
+  factors = 1:10,
+  sign = "negative",
+  verbose = TRUE
+)
+
+res.negative_Protein  <- run_enrichment(MOFA_out,
+  feature.sets = MSigDB_v6.0_C5_human_Protein,
+  view = "protein",
+  factors = 1:10,
+  sign = "negative",
+  verbose = TRUE
+)
+
+res.negative_Ubiq  <- run_enrichment(MOFA_out,
+  feature.sets = MSigDB_v6.0_C5_human_Ubiq,
+  view = "Ubiq", 
+  factors = 1:10,
+  sign = "negative",
+  verbose = TRUE
+)
+
+save(res.positive_RNA, res.positive_Protein, res.positive_Ubiq,
+     res.negative_RNA, res.negative_Protein, res.negative_Ubiq,
+     file = "gsea_results.RData")
+
+
+```
+
+
+Plotting the genes / proteins contributing the most to the top weights in factor 1
+```{r}
+
+plot_enrichment_detailed(
+  enrichment.results = res.positive_RNA,
+  factor = 1,
+  max.pathways = 10
+) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 14)) +
+  labs(title = "Detailed GSEA Plot (Factor 1, Positive Weights)",
+       subtitle = "RNA View - MSigDB C5 (GO)")
+
+plot_enrichment_detailed(
+  enrichment.results = res.positive_Protein,
+  factor = 1,
+  max.pathways = 10
+) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 14)) +
+  labs(title = "Detailed GSEA Plot (Factor 1, Positive Weights)",
+       subtitle = "Protein View - MSigDB C5 (GO)")
+
+plot_enrichment_detailed(
+  enrichment.results = res.positive_Ubiq,
+  factor = 1,
+  max.pathways = 10
+) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        text = element_text(size = 14)) +
+  labs(title = "Detailed GSEA Plot (Factor 1, Positive Weights)",
+       subtitle = "Ubiq View - MSigDB C5 (GO)")
+
+```
+
+
+
+UMAP Analysis and Plotting of MOFA Factors
+```{r}
+# Helper function to generate the default ggplot2 color palette
+gg_color_hue <- function(n) {
+  hues <- seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Ensure that 'sample' is a column in the metadata and set it as rownames
+stopifnot("sample" %in% colnames(MOFA_out@samples_metadata))
+rownames(MOFA_out@samples_metadata) <- MOFA_out@samples_metadata$sample
+
+# Run UMAP if it hasn't been run already
+if (!"UMAP" %in% names(MOFA_out@dim_red)) {
+  set.seed(42) # for reproducibility
+  MOFA_out <- run_umap(MOFA_out)
+}
+
+# Extract only the UMAP coordinate columns to prevent column name conflicts
+umap_coords <- as.data.frame(MOFA_out@dim_red$UMAP) %>%
+  dplyr::select(UMAP1, UMAP2)
+
+# Align metadata to the UMAP coordinates using the robust rownames
+metadata_aligned <- MOFA_out@samples_metadata[rownames(umap_coords), , drop = FALSE]
+
+# Combine UMAP coordinates and metadata into a single data frame for plotting
+plot_df <- cbind(umap_coords, metadata_aligned) %>%
+  mutate(
+    Background = factor(case_when(
+      str_detect(group, "_80$") ~ "80",
+      str_detect(group, "_MGH$") ~ "MGH",
+      TRUE ~ "Unknown"
+    )),
+    Mutation = factor(str_replace(group, "_(80|MGH)$", ""))
+  )
+
+# --- Plot 1: Colored by Background ---
+background_colors <- c("80" = gg_color_hue(2)[1], "MGH" = gg_color_hue(2)[2], "Unknown" = "grey50")
+
+umap_plot_background <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Background)) +
+  # Updated point size and transparency
+  geom_point(size = 8, alpha = 0.6) +
+  scale_color_manual(values = background_colors) +
+  labs(
+    title = "UMAP of MOFA Factors",
+    subtitle = "Colored by Background",
+    color = "Background"
+  ) +
+  theme_bw(base_size = 12) +
+  # Updated theme to remove grid lines
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# --- Plot 2: Colored by Mutation Type ---
+mutation_levels <- levels(plot_df$Mutation)
+mutation_colors <- gg_color_hue(length(mutation_levels))
+names(mutation_colors) <- mutation_levels
+
+umap_plot_mutation <- ggplot(plot_df, aes(x = UMAP1, y = UMAP2, color = Mutation)) +
+  # Updated point size and transparency
+  geom_point(size = 8, alpha = 0.6) +
+  scale_color_manual(values = mutation_colors) +
+  labs(
+    title = "UMAP of MOFA Factors",
+    subtitle = "Colored by Mutation Type",
+    color = "Mutation"
+  ) +
+  theme_bw(base_size = 12) +
+  # Updated theme to remove grid lines
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# -- 4. Display the Plots ----
+print(umap_plot_background)
+print(umap_plot_mutation)
+
+```
+
+Gene Set Enrichment Analysis of MOFA Factors using gprofiler2
+```{r}
+# --- Define Parameters ---
+TARGET_FACTOR <- 1
+SOURCE_GENESET <- "REAC"
+FDR_THRESHOLD <- 0.05
+TOP_N_TERMS_PLOT <- 15
+Y_AXIS_LABEL_WIDTH <- 50
+
+# Define the views and their corresponding feature suffixes to be removed
+VIEWS_TO_PROCESS <- c("RNA" = "_RNA$", "protein" = "_protein$", "Ubiq" = "_ubiq$")
+
+
+# Helper function to run GSEA for a given set of weights
+run_gsea <- function(weights, suffix_to_remove) {
+  # Clean feature names by removing view-specific suffixes
+  features <- unique(gsub(suffix_to_remove, "", weights$feature))
+
+  if (length(features) < 3) return(NULL)
+
+  # Perform enrichment analysis using gprofiler2
+  gost_result <- gost(
+    query = features,
+    organism = "hsapiens",
+    sources = SOURCE_GENESET,
+    user_threshold = FDR_THRESHOLD,
+    correction_method = "fdr"
+  )
+
+  if (!is.null(gost_result)) {
+    gost_result$result %>%
+      group_by(term_name) %>%
+      slice_min(order_by = p_value, n = 1, with_ties = FALSE) %>%
+      ungroup()
+  } else {
+    NULL
+  }
+}
+
+# Get all weights for the target factor
+all_weights <- get_weights(
+  MOFA_out,
+  factors = TARGET_FACTOR,
+  as.data.frame = TRUE
+)
+
+# Run GSEA for positive and negative weights for each view
+gsea_results <- lapply(names(VIEWS_TO_PROCESS), function(view_name) {
+  view_suffix <- VIEWS_TO_PROCESS[[view_name]]
+
+  # Process positive weights
+  weights_pos <- all_weights %>% filter(view == view_name & value > 0)
+  results_pos <- if (nrow(weights_pos) > 0) run_gsea(weights_pos, view_suffix) else NULL
+
+  # Process negative weights
+  weights_neg <- all_weights %>% filter(view == view_name & value < 0)
+  results_neg <- if (nrow(weights_neg) > 0) run_gsea(weights_neg, view_suffix) else NULL
+
+  Sys.sleep(1) # Be courteous to the g:Profiler API
+  list(positive = results_pos, negative = results_neg)
+})
+names(gsea_results) <- names(VIEWS_TO_PROCESS)
+
+
+
+# Calculate a global y-axis limit for consistent scaling across all plots
+all_results_df <- bind_rows(unlist(gsea_results, recursive = FALSE))
+global_plot_limit <- if (nrow(all_results_df) > 0) ceiling(max(-log10(all_results_df$p_value))) else 10
+
+# Helper function to create a standardized bar plot
+create_gsea_plot <- function(results_df, view_name, weight_sign) {
+  if (is.null(results_df) || nrow(results_df) == 0) return(NULL)
+
+  plot_data <- results_df %>%
+    mutate(NegLog10FDR = -log10(p_value)) %>%
+    slice_max(order_by = NegLog10FDR, n = TOP_N_TERMS_PLOT) %>%
+    mutate(
+      term_name_truncated = str_trunc(term_name, width = Y_AXIS_LABEL_WIDTH),
+      term_name_ordered = fct_reorder(term_name_truncated, NegLog10FDR)
+    )
+
+  # Swapped color palettes: Positive is now Blues, Negative is now Reds
+  color_palette <- if (weight_sign == "Positive") "Blues" else "Reds"
+
+  ggplot(plot_data, aes(x = term_name_ordered, y = NegLog10FDR, fill = NegLog10FDR)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_distiller(palette = color_palette, direction = 1, limits = c(0, global_plot_limit)) +
+    scale_y_continuous(limits = c(0, global_plot_limit), expand = c(0, 0.1)) +
+    labs(
+      title = paste(view_name, "View Enrichment"),
+      subtitle = paste(weight_sign, "Weights | Factor", TARGET_FACTOR, "|", SOURCE_GENESET),
+      x = NULL,
+      y = expression(-log[10]("FDR")),
+      fill = expression(-log[10]("FDR"))
+    ) +
+    theme_minimal(base_size = 11) +
+    # Added theme elements to remove the grid
+    theme(
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()
+    )
+}
+
+# Generate a list of all plots
+plot_list <- unlist(lapply(names(gsea_results), function(view) {
+  list(
+    create_gsea_plot(gsea_results[[view]]$positive, view, "Positive"),
+    create_gsea_plot(gsea_results[[view]]$negative, view, "Negative")
+  )
+}), recursive = FALSE)
+
+# Filter out any null plots that might have been generated
+plot_list <- Filter(Negate(is.null), plot_list)
+
+
+# Convert plots to graphical objects (grobs) to measure their components
+grob_list <- lapply(plot_list, ggplotGrob)
+
+# Find the maximum width of the y-axis labels across all plots
+max_width <- do.call(grid::unit.pmax, lapply(grob_list, function(g) g$widths[g$layout$l[grepl("axis-l", g$layout$name)]]))
+
+# Apply the maximum width to all plots to standardize them
+grob_list_aligned <- lapply(grob_list, function(g) {
+  g$widths[g$layout$l[grepl("axis-l", g$layout$name)]] <- max_width
+  return(g)
+})
+
+# Display each aligned plot
+for (grob in grob_list_aligned) {
+  grid.newpage()
+  grid.draw(grob)
+  Sys.sleep(1)
+}
+```
+
+Gene Set Enrichment Analysis of MOFA Factors (Human Phenotype Ontology)
+```{r}
+# --- Define Parameters ---
+TARGET_FACTOR <- 1
+SOURCE_GENESET <- "HP"
+FDR_THRESHOLD <- 0.05
+TOP_N_TERMS_PLOT <- 15
+Y_AXIS_LABEL_WIDTH <- 50
+
+
+# Define the views and their corresponding feature suffixes to be removed
+VIEWS_TO_PROCESS <- c("RNA" = "_RNA$", "protein" = "_protein$", "Ubiq" = "_ubiq$")
+
+
+# Helper function to run GSEA for a given set of weights
+run_gsea <- function(weights, suffix_to_remove) {
+  # Clean feature names by removing view-specific suffixes
+  features <- unique(gsub(suffix_to_remove, "", weights$feature))
+
+  if (length(features) < 3) return(NULL)
+
+  # Perform enrichment analysis using gprofiler2
+  gost_result <- gost(
+    query = features,
+    organism = "hsapiens",
+    sources = SOURCE_GENESET,
+    user_threshold = FDR_THRESHOLD,
+    correction_method = "fdr"
+  )
+
+  # Return significant results, aggregating by term name to keep the most significant
+  if (!is.null(gost_result)) {
+    gost_result$result %>%
+      group_by(term_name) %>%
+      slice_min(order_by = p_value, n = 1, with_ties = FALSE) %>%
+      ungroup()
+  } else {
+    NULL
+  }
+}
+
+all_weights <- get_weights(
+  MOFA_out,
+  factors = TARGET_FACTOR,
+  as.data.frame = TRUE
+)
+
+# Run GSEA for positive and negative weights for each view
+gsea_results <- lapply(names(VIEWS_TO_PROCESS), function(view_name) {
+  view_suffix <- VIEWS_TO_PROCESS[[view_name]]
+
+  # Process positive weights
+  weights_pos <- all_weights %>% filter(view == view_name & value > 0)
+  results_pos <- if (nrow(weights_pos) > 0) run_gsea(weights_pos, view_suffix) else NULL
+
+  # Process negative weights
+  weights_neg <- all_weights %>% filter(view == view_name & value < 0)
+  results_neg <- if (nrow(weights_neg) > 0) run_gsea(weights_neg, view_suffix) else NULL
+
+  Sys.sleep(1) # Be courteous to the g:Profiler API
+  list(positive = results_pos, negative = results_neg)
+})
+names(gsea_results) <- names(VIEWS_TO_PROCESS)
+
+
+# Calculate a global y-axis limit for consistent scaling across all plots
+all_results_df <- bind_rows(unlist(gsea_results, recursive = FALSE))
+global_plot_limit <- if (nrow(all_results_df) > 0) ceiling(max(-log10(all_results_df$p_value))) else 10
+
+# Helper function to create a standardized bar plot
+create_gsea_plot <- function(results_df, view_name, weight_sign) {
+  if (is.null(results_df) || nrow(results_df) == 0) return(NULL)
+
+  plot_data <- results_df %>%
+    mutate(NegLog10FDR = -log10(p_value)) %>%
+    slice_max(order_by = NegLog10FDR, n = TOP_N_TERMS_PLOT) %>%
+    mutate(
+      term_name_truncated = str_trunc(term_name, width = Y_AXIS_LABEL_WIDTH),
+      term_name_ordered = fct_reorder(term_name_truncated, NegLog10FDR)
+    )
+
+  # Swapped color palettes: Positive is now Blues, Negative is now Reds
+  color_palette <- if (weight_sign == "Positive") "Blues" else "Reds"
+
+  ggplot(plot_data, aes(x = term_name_ordered, y = NegLog10FDR, fill = NegLog10FDR)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_distiller(palette = color_palette, direction = 1, limits = c(0, global_plot_limit)) +
+    scale_y_continuous(limits = c(0, global_plot_limit), expand = c(0, 0.1)) +
+    labs(
+      title = paste(view_name, "View Enrichment"),
+      subtitle = paste(weight_sign, "Weights | Factor", TARGET_FACTOR, "|", SOURCE_GENESET),
+      x = NULL,
+      y = expression(-log[10]("FDR")),
+      fill = expression(-log[10]("FDR"))
+    ) +
+    theme_minimal(base_size = 11) +
+    # Added theme elements to remove the grid
+    theme(
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()
+    )
+}
+
+# Generate a list of all plots
+plot_list <- unlist(lapply(names(gsea_results), function(view) {
+  list(
+    create_gsea_plot(gsea_results[[view]]$positive, view, "Positive"),
+    create_gsea_plot(gsea_results[[view]]$negative, view, "Negative")
+  )
+}), recursive = FALSE)
+
+plot_list <- Filter(Negate(is.null), plot_list)
+
+# Convert plots to graphical objects (grobs) to measure their components
+grob_list <- lapply(plot_list, ggplotGrob)
+
+# Find the maximum width of the y-axis labels across all plots
+max_width <- do.call(grid::unit.pmax, lapply(grob_list, function(g) g$widths[g$layout$l[grepl("axis-l", g$layout$name)]]))
+
+# Apply the maximum width to all plots to standardize them
+grob_list_aligned <- lapply(grob_list, function(g) {
+  g$widths[g$layout$l[grepl("axis-l", g$layout$name)]] <- max_width
+  return(g)
+})
+
+# Display each aligned plot
+for (grob in grob_list_aligned) {
+  grid.newpage()
+  grid.draw(grob)
+  Sys.sleep(1)
+}
+
+```
+
+
+
+Export REACTOME results from Factor 1
+```{r}
+# ===================================================================
+# EXPORT MOFA GSEA RESULTS TO XLSX
+# ===================================================================
+
+# Ensure the 'openxlsx' library is loaded
+# install.packages("openxlsx") # Run this line if you don't have it installed
+library(openxlsx)
+
+# --- 1. Create a list to hold all the data frames for export ---
+list_for_export <- list()
+
+# --- 2. Loop through the nested gsea_results list ---
+# The outer loop goes through the views ('RNA', 'protein', 'Ubiq')
+for (view_name in names(gsea_results)) {
+  
+  # The inner loop goes through the weight signs ('positive', 'negative')
+  for (sign_name in names(gsea_results[[view_name]])) {
+    
+    # Create a descriptive name for the Excel sheet
+    # e.g., "RNA_Positive_Weights"
+    sheet_name <- paste(view_name, sign_name, "Weights", sep = "_")
+    
+    # Extract the results data frame for the current combination
+    results_df <- gsea_results[[view_name]][[sign_name]]
+    
+    # Check if the result is NULL or empty. If so, create a placeholder.
+    if (is.null(results_df) || nrow(results_df) == 0) {
+      list_for_export[[sheet_name]] <- data.frame(
+        Message = paste("No significant", SOURCE_GENESET, "terms found.")
+      )
+    } else {
+      # Otherwise, add the full results table to our list
+      list_for_export[[sheet_name]] <- as.data.frame(results_df)
+    }
+  }
+}
+
+# --- 3. Write the list of data frames to a single .xlsx file ---
+# Each element in the list will become a separate worksheet.
+write.xlsx(
+  list_for_export,
+  file = paste0("MOFA_GSEA_Factor", TARGET_FACTOR, "_Results.xlsx"),
+  rowNames = FALSE,
+  overwrite = TRUE
+)
+
+# --- 4. Print a confirmation message ---
+message(paste0(
+  "Successfully exported MOFA GSEA results for Factor ", TARGET_FACTOR, 
+  " to 'MOFA_GSEA_Factor", TARGET_FACTOR, "_Results.xlsx'"
+))
+```
+
+
+
+Export HPO results from Factor 1
+```{r}
+# ===================================================================
+# EXPORT MOFA GSEA (HP) RESULTS TO XLSX
+# ===================================================================
+
+# Ensure the 'openxlsx' library is loaded
+# install.packages("openxlsx") # Run this line if you don't have it installed
+library(openxlsx)
+
+# --- 1. Create a list to hold all the data frames for export ---
+list_for_export_hp <- list()
+
+# --- 2. Loop through the nested gsea_results list ---
+# The outer loop goes through the views ('RNA', 'protein', 'Ubiq')
+for (view_name in names(gsea_results)) {
+  
+  # The inner loop goes through the weight signs ('positive', 'negative')
+  for (sign_name in names(gsea_results[[view_name]])) {
+    
+    # Create a descriptive name for the Excel sheet
+    # e.g., "RNA_Positive_Weights"
+    sheet_name <- paste(view_name, sign_name, "Weights", sep = "_")
+    
+    # Extract the results data frame for the current combination
+    results_df <- gsea_results[[view_name]][[sign_name]]
+    
+    # Check if the result is NULL or empty. If so, create a placeholder.
+    if (is.null(results_df) || nrow(results_df) == 0) {
+      list_for_export_hp[[sheet_name]] <- data.frame(
+        Message = paste("No significant", SOURCE_GENESET, "terms found.")
+      )
+    } else {
+      # Otherwise, add the full results table to our list
+      list_for_export_hp[[sheet_name]] <- as.data.frame(results_df)
+    }
+  }
+}
+
+# --- 3. Write the list of data frames to a single .xlsx file ---
+# The file name dynamically includes the TARGET_FACTOR and SOURCE_GENESET
+output_filename <- paste0("MOFA_GSEA_", SOURCE_GENESET, "_Factor", TARGET_FACTOR, "_Results.xlsx")
+
+write.xlsx(
+  list_for_export_hp,
+  file = output_filename,
+  rowNames = FALSE,
+  overwrite = TRUE
+)
+
+# --- 4. Print a confirmation message ---
+message(paste("Successfully exported MOFA GSEA (HP) results to:", output_filename))
+
+```
+
+Gene Set Enrichment Analysis of MOFA Factors using gprofiler2
+Combination of Factor 1 +3
+```{r}
+# --- Define Parameters ---
+TARGET_FACTORS <- c(1, 3)     # The two factors to combine
+SOURCE_GENESET <- "REAC"
+FDR_THRESHOLD <- 0.05
+TOP_N_TERMS_PLOT <- 15
+Y_AXIS_LABEL_WIDTH <- 50
+
+# NEW: Since we removed n=100, we must filter out tiny noise weights 
+# to avoid the "Everything is a hit" error.
+WEIGHT_THRESHOLD <- 0.5       
+
+# Define the views and their corresponding feature suffixes to be removed
+VIEWS_TO_PROCESS <- c("RNA" = "_RNA$", "protein" = "_protein$", "Ubiq" = "_ubiq$")
+
+# --- 1. Data Processing: Calculate Composite Score (F1 + F3) ---
+
+# Get weights for both factors
+raw_weights <- get_weights(
+  MOFA_out,
+  factors = TARGET_FACTORS,
+  as.data.frame = TRUE
+)
+
+# Pivot and Sum: Calculate the mathematical combination
+composite_weights <- raw_weights %>%
+  select(feature, view, factor, value) %>%
+  pivot_wider(names_from = factor, values_from = value, names_prefix = "Factor") %>%
+  # Dynamically calculate sum of the columns named FactorX and FactorY
+  mutate(composite_score = rowSums(select(., starts_with("Factor"))))
+
+# --- 2. Helper Functions ---
+
+# Helper function to run GSEA
+run_gsea <- function(weights_df, suffix_to_remove) {
+  # Clean feature names
+  features <- unique(gsub(suffix_to_remove, "", weights_df$feature))
+  
+  if (length(features) < 3) return(NULL)
+  
+  # Perform enrichment analysis
+  gost_result <- gost(
+    query = features,
+    organism = "hsapiens",
+    sources = SOURCE_GENESET,
+    user_threshold = FDR_THRESHOLD,
+    correction_method = "fdr"
+  )
+  
+  if (!is.null(gost_result)) {
+    gost_result$result %>%
+      group_by(term_name) %>%
+      slice_min(order_by = p_value, n = 1, with_ties = FALSE) %>%
+      ungroup()
+  } else {
+    NULL
+  }
+}
+
+# Helper function to create standardized bar plot
+create_gsea_plot <- function(results_df, view_name, weight_sign) {
+  if (is.null(results_df) || nrow(results_df) == 0) return(NULL)
+  
+  # Format title based on the combination
+  combo_title <- paste("Factor", paste(TARGET_FACTORS, collapse = " + "))
+  
+  plot_data <- results_df %>%
+    mutate(NegLog10FDR = -log10(p_value)) %>%
+    slice_max(order_by = NegLog10FDR, n = TOP_N_TERMS_PLOT) %>%
+    mutate(
+      term_name_truncated = str_trunc(term_name, width = Y_AXIS_LABEL_WIDTH),
+      term_name_ordered = fct_reorder(term_name_truncated, NegLog10FDR)
+    )
+  
+  color_palette <- if (weight_sign == "Positive") "Blues" else "Reds"
+  
+  ggplot(plot_data, aes(x = term_name_ordered, y = NegLog10FDR, fill = NegLog10FDR)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_distiller(palette = color_palette, direction = 1, limits = c(0, global_plot_limit)) +
+    scale_y_continuous(limits = c(0, global_plot_limit), expand = c(0, 0.1)) +
+    labs(
+      title = paste(view_name, "Enrichment"),
+      subtitle = paste(weight_sign, "Drivers of", combo_title),
+      x = NULL,
+      y = expression(-log[10]("FDR")),
+      fill = expression(-log[10]("FDR"))
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+
+# --- 3. Run GSEA on Composite Scores ---
+
+gsea_results <- lapply(names(VIEWS_TO_PROCESS), function(view_name) {
+  view_suffix <- VIEWS_TO_PROCESS[[view_name]]
+  
+  # Filter weights for this view
+  view_data <- composite_weights %>% filter(view == view_name)
+  
+  # Process Positive Composite Scores (Using Threshold instead of Top N)
+  pos_drivers <- view_data %>% filter(composite_score > WEIGHT_THRESHOLD)
+  results_pos <- if (nrow(pos_drivers) > 0) run_gsea(pos_drivers, view_suffix) else NULL
+  
+  # Process Negative Composite Scores (Using Threshold instead of Top N)
+  neg_drivers <- view_data %>% filter(composite_score < -WEIGHT_THRESHOLD)
+  results_neg <- if (nrow(neg_drivers) > 0) run_gsea(neg_drivers, view_suffix) else NULL
+  
+  Sys.sleep(1) 
+  list(positive = results_pos, negative = results_neg)
+})
+names(gsea_results) <- names(VIEWS_TO_PROCESS)
+
+
+# --- 4. Plotting and Alignment (Unchanged from your snippet) ---
+
+# Calculate global limit
+all_results_df <- bind_rows(unlist(gsea_results, recursive = FALSE))
+global_plot_limit <- if (nrow(all_results_df) > 0) ceiling(max(-log10(all_results_df$p_value))) else 10
+
+# Generate plot list
+plot_list <- unlist(lapply(names(gsea_results), function(view) {
+  list(
+    create_gsea_plot(gsea_results[[view]]$positive, view, "Positive"),
+    create_gsea_plot(gsea_results[[view]]$negative, view, "Negative")
+  )
+}), recursive = FALSE)
+
+# Filter nulls
+plot_list <- Filter(Negate(is.null), plot_list)
+
+if (length(plot_list) > 0) {
+  # Convert to grobs
+  grob_list <- lapply(plot_list, ggplotGrob)
+  
+  # Align widths
+  max_width <- do.call(grid::unit.pmax, lapply(grob_list, function(g) g$widths[g$layout$l[grepl("axis-l", g$layout$name)]]))
+  grob_list_aligned <- lapply(grob_list, function(g) {
+    g$widths[g$layout$l[grepl("axis-l", g$layout$name)]] <- max_width
+    return(g)
+  })
+  
+  # Draw plots
+  for (grob in grob_list_aligned) {
+    grid.newpage()
+    grid.draw(grob)
+    Sys.sleep(0.5)
+  }
+} else {
+  message("No significant enrichment found. Try lowering WEIGHT_THRESHOLD.")
+}
+```
+
+
+
+```{r}
+library(MOFA2)
+library(msigdbr)
+library(data.table)
+library(tidyverse)
+
+# --- Define Parameters ---
+TARGET_FACTOR <- 1
+TARGET_VIEW <- "RNA"   # Change this if you want to test 'protein' or 'Ubiq'
+
+# Helper function to convert data.frame to matrix (replaces 'matrix.please')
+as_binary_matrix <- function(df) {
+  mat <- as.matrix(df[, -1])
+  rownames(mat) <- df[[1]]
+  return(mat)
+}
+
+# 1. Fetch Gene Sets (GO:BP from MSigDB)
+# We use data.table for fast reshaping as done in the tutorial
+message("Fetching MSigDB data...")
+genesets_df <- msigdbr(species = "Homo sapiens", category = "C5", subcategory = "BP") %>% 
+  as.data.table()
+
+# 2. Create Binary Matrix (1 = gene in pathway, 0 = not in pathway)
+message("Creating binary gene set matrix...")
+msgidb.matrix <- genesets_df[, id := 1] %>%
+  dcast(gs_name ~ gene_symbol, value.var = "id", fill = 0) %>%
+  as_binary_matrix()
+
+message("Matrix created. Dimensions: ", paste(dim(msgidb.matrix), collapse = " x "))
+```
+
+```{r}
+# --- Run Enrichment for Positive Weights ---
+message("Running GSEA on POSITIVE weights for Factor ", TARGET_FACTOR, "...")
+gsea.positive <- run_enrichment(
+  MOFA_out,
+  feature.sets = msgidb.matrix,
+  view = TARGET_VIEW,
+  factor = TARGET_FACTOR,
+  sign = "positive"
+)
+
+# --- Run Enrichment for Negative Weights ---
+message("Running GSEA on NEGATIVE weights for Factor ", TARGET_FACTOR, "...")
+gsea.negative <- run_enrichment(
+  MOFA_out,
+  feature.sets = msgidb.matrix,
+  view = TARGET_VIEW,
+  factor = TARGET_FACTOR,
+  sign = "negative"
+)
+```
+
+
+
+```{r}
+# --- Plot 1: Top Enriched Pathways (Positive Weights) ---
+plot_enrichment(
+  gsea.positive, 
+  factor = TARGET_FACTOR, 
+  max.pathways = 15
+) + ggtitle(paste("Factor", TARGET_FACTOR, "Positive Enrichment (GO:BP)"))
+
+# --- Plot 2: Top Enriched Pathways (Negative Weights) ---
+plot_enrichment(
+  gsea.negative, 
+  factor = TARGET_FACTOR, 
+  max.pathways = 15
+) + ggtitle(paste("Factor", TARGET_FACTOR, "Negative Enrichment (GO:BP)"))
+
+# --- Plot 3: Detailed GSEA Plot (Gene Weights inside Pathways) ---
+# This shows the specific genes driving the top pathways
+plot_enrichment_detailed(
+  gsea.positive,
+  factor = TARGET_FACTOR,
+  max.genes = 10,
+  max.pathways = 5
+) + ggtitle(paste("Detailed Drivers: Factor", TARGET_FACTOR, "(Positive)"))
+
+plot_enrichment_detailed(
+  gsea.negative,
+  factor = TARGET_FACTOR,
+  max.genes = 10,
+  max.pathways = 5
+) + ggtitle(paste("Detailed Drivers: Factor", TARGET_FACTOR, "(Negative)"))
+```
+```{r}
+library(MOFA2)
+library(msigdbr)
+library(data.table)
+library(tidyverse)
+library(gridExtra)
+
+# --- 1. Define Parameters ---
+TARGET_FACTOR <- 1
+
+# Map View Names in MOFA to the Suffix they use in feature names
+# These are appended to the gene symbols so they match the MOFA model
+VIEW_SUFFIXES <- c(
+  "RNA"     = "_RNA",
+  "protein" = "_protein",
+  "Ubiq"    = "_ubiq"
+)
+
+# --- 2. Prepare Base Gene Set Matrix (Reactome) ---
+message("Fetching MSigDB data (Reactome)...")
+
+# Fetch Reactome (C2:CP:REACTOME)
+genesets_df <- msigdbr(species = "Homo sapiens", collection = "C2", subcollection = "CP:REACTOME") %>% 
+  as.data.table()
+
+message("Creating base binary gene set matrix...")
+# Reshape to Wide Format (Rows = Pathways, Cols = Gene Symbols)
+# fun.aggregate = length handles duplicates (genes appearing twice in a pathway)
+wide_dt <- genesets_df[, id := 1] %>%
+  dcast(gs_name ~ gene_symbol, value.var = "id", fill = 0, fun.aggregate = length)
+
+# Convert to Matrix
+# Exclude the first column (pathway names) from the data values
+base_matrix <- as.matrix(wide_dt[, -1])
+rownames(base_matrix) <- wide_dt$gs_name
+
+# Ensure strictly binary and numeric
+# (If a gene was counted twice, set it back to 1)
+base_matrix[base_matrix > 1] <- 1
+mode(base_matrix) <- "numeric"
+
+message("Base Matrix Ready: ", paste(dim(base_matrix), collapse = " x "))
+
+
+# --- 3. Main Loop: Run GSEA for Each View ---
+
+# Helper function to plot safely without crashing
+safe_plot_enrichment <- function(gsea_result, title_text) {
+  tryCatch({
+    # Try plotting with default alpha (usually 0.05 or 0.1)
+    p <- plot_enrichment(gsea_result, factor = TARGET_FACTOR, max.pathways = 10) +
+      ggtitle(title_text) +
+      theme(plot.title = element_text(size=12, face="bold"))
+    return(p)
+  }, error = function(e) {
+    # If it fails (usually "No significant pathways"), print a message instead of crashing
+    message(paste("      [INFO] No significant pathways found for:", title_text))
+    return(NULL)
+  })
+}
+
+all_gsea_results <- list()
+
+for (view_name in names(VIEW_SUFFIXES)) {
+  
+  suffix <- VIEW_SUFFIXES[[view_name]]
+  message(paste0("\n=== Processing View: ", view_name, " (Suffix: ", suffix, ") ==="))
+  
+  # A. Feature Alignment
+  # --------------------
+  # Get the actual feature names from the MOFA model for this view
+  mofa_features <- features_names(MOFA_out)[[view_name]]
+  
+  # Create a view-specific copy of the matrix
+  view_matrix <- base_matrix
+  
+  # Append the suffix to the gene symbols (e.g., TP53 -> TP53_RNA)
+  colnames(view_matrix) <- paste0(colnames(view_matrix), suffix)
+  
+  # Check overlap
+  common_features <- intersect(colnames(view_matrix), mofa_features)
+  message(sprintf("   Matched %d features between Reactome and MOFA model.", length(common_features)))
+  
+  # Skip if overlap is too small (avoids empty GSEA errors)
+  if (length(common_features) < 10) {
+    warning(paste("   Skipping", view_name, "- too few matching features. Check your suffix!"))
+    next
+  }
+  
+  # Subset matrix to only matching features
+  view_matrix <- view_matrix[, common_features, drop = FALSE]
+  
+  
+  # B. Run Enrichment
+  # -----------------
+  message("   Running GSEA (Positive weights)...")
+  gsea_pos <- run_enrichment(
+    MOFA_out, feature.sets = view_matrix, 
+    view = view_name, factor = TARGET_FACTOR, sign = "positive"
+  )
+  
+  message("   Running GSEA (Negative weights)...")
+  gsea_neg <- run_enrichment(
+    MOFA_out, feature.sets = view_matrix, 
+    view = view_name, factor = TARGET_FACTOR, sign = "negative"
+  )
+  
+  # Store results
+  all_gsea_results[[view_name]] <- list(positive = gsea_pos, negative = gsea_neg)
+  
+  
+  # C. Generate & Print Plots (Safely)
+  # ----------------------------------
+  message("   Generating plots...")
+  
+  # Plot Positive
+  p1 <- safe_plot_enrichment(gsea_pos, paste0(view_name, ": Positive (Factor ", TARGET_FACTOR, ")"))
+  if(!is.null(p1)) print(p1)
+  
+  # Plot Negative
+  p2 <- safe_plot_enrichment(gsea_neg, paste0(view_name, ": Negative (Factor ", TARGET_FACTOR, ")"))
+  if(!is.null(p2)) print(p2)
+}
+
+message("\n=== All Views Processed ===")
+```
+

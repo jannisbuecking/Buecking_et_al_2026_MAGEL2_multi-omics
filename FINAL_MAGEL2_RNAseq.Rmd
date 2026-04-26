@@ -1,0 +1,282 @@
+---
+title: "Untitled"
+author: "Michael Eibl"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library("DESeq2")
+library("stringr")
+library("ggplot2")
+library("ggpubr")
+library("viridis")
+library("RNAseqQC")
+library("ensembldb")
+library("dplyr")
+library("patchwork")
+library("purrr")
+library("org.Hs.eg.db")
+library("annotate")
+library("AnnotationHub")
+library('EnhancedVolcano')
+library("gridExtra")
+library("grid")
+library("clusterProfiler")
+library("eulerr")
+library("ComplexHeatmap")
+library("openxlsx")
+library("Homo.sapiens")
+library("tidyverse")
+library("gprofiler2")
+library("UpSetR")
+library("ComplexUpset")
+library("tximeta")
+library("DEP2")
+```
+
+```{r}
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+`%notin%` <- Negate(`%in%`)
+```
+
+
+##Read in data
+
+```{r}
+counts_RNA_subread <- readRDS(file = "count_matrix_RNAseq_MAGEL2_project.rds")
+
+counts_RNA <- counts_RNA_subread$counts
+
+colnames(counts_RNA)
+
+for (i in 1:ncol(counts_RNA)) {
+  colnames(counts_RNA)[i] <-
+    str_replace(string = colnames(counts_RNA)[i],
+                pattern = ".bam",
+                replacement = "")
+  
+  colnames(counts_RNA)[i] <-
+    str_replace(string = colnames(counts_RNA)[i],
+                pattern = "GM08330",
+                replacement = "8330")
+  
+  colnames(counts_RNA)[i] <-
+    str_replace(string = colnames(counts_RNA)[i],
+                pattern = "MGH2069",
+                replacement = "MGH")
+  
+  colnames(counts_RNA)[i] <-
+    str_replace(string = colnames(counts_RNA)[i],
+                pattern = "PSWT",
+                replacement = "PWST")
+}
+
+sample_info <- data.frame(row.names = colnames(counts_RNA),
+                          background = c(rep("8330", 21), rep("MGH", 21)),
+                          genotype = c(rep("DelC", 3), rep("DupC", 3), rep("HetDel", 3),
+                                       rep("HomoDel", 3), rep("WT", 3), rep("PWSTII", 3), rep("PWSTI", 3),
+                                       rep("PWSTI", 3), rep("PWSTII", 3), rep("DelC", 3), rep("DupC", 3),
+                                       rep("HetDel", 3), rep("HomoDel", 3), rep("WT", 3)),
+                          replicate = rep(c(1,2,3), 14))
+all(rownames(sample_info) == colnames(counts_RNA))
+
+sample_info$background <- as.factor(sample_info$background)
+sample_info$genotype <- as.factor(sample_info$genotype)
+sample_info$replicate <- as.factor(sample_info$replicate)
+
+sample_info_8330 <- sample_info[which(sample_info$background == "8330"),]
+sample_info_8330$background <- droplevels(sample_info_8330$background)
+sample_info_MGH <- sample_info[which(sample_info$background == "MGH"),]
+sample_info_MGH$background <- droplevels(sample_info_MGH$background)
+
+```
+
+
+
+```{r}
+#Convert geneIDs to symbols
+length(rownames(counts_RNA))
+counts_RNA <- cbind(as.data.frame(counts_RNA), symbol = getSYMBOL(rownames(counts_RNA), data='org.Hs.eg')) %>% na.omit()
+dim(counts_RNA)
+rownames(counts_RNA) <- counts_RNA$symbol
+counts_RNA[,"symbol"] <- NULL
+
+counts_RNA_8330 <- counts_RNA[,grep("8330", colnames(counts_RNA))]
+counts_RNA_MGH <- counts_RNA[,grep("MGH", colnames(counts_RNA))]
+```
+
+##RNA-seq raw counts QC
+
+```{r}
+#For QC, gene symbols need to be converted to ENSEMBLE gene IDs
+ah <- AnnotationHub()
+
+ahDB <- query(ah, c("EnsDb", "Homo sapiens", 110))
+ahEdb <- ahDB[[1]]
+
+geneIDs <- ensembldb::select(ahEdb, keys= rownames(counts_RNA), keytype = "SYMBOL", columns = c("SYMBOL","GENEID"))
+
+counts_RNA$ENS <- NA
+for (i in 1:nrow(counts_RNA)) {
+  counts_RNA$ENS[i] <- geneIDs$GENEID[which(geneIDs$SYMBOL == rownames(counts_RNA)[i])][1]
+}
+
+dim(counts_RNA)
+counts_RNA <- na.omit(counts_RNA)
+rownames(counts_RNA) <- counts_RNA$ENS
+counts_RNA$ENS <- NULL
+dim(counts_RNA)
+
+dds_RNA <- RNAseqQC::make_dds(counts = counts_RNA,
+                    metadata = sample_info,
+                    ah_record = "AH113665",
+                    design = ~ background + genotype)
+QCplots <- list()
+QCplots[["lib_size"]] <- plot_total_counts(dds_RNA) + ggtitle(label = "Library size roughly in the\nsame order of magnitude")
+QCplots[["lib_complex"]] <- plot_library_complexity(dds_RNA) + ggtitle(label = "Library complexity comparable\n")
+QCplots[["n_detected_genes"]] <- plot_gene_detection(dds_RNA) + ggtitle(label = "Number of detected genes\ncomparable")
+QCplots[["gene_biotypes"]] <- plot_biotypes(dds_RNA) + ggtitle(label = "Comparable expression of gene biotypes")
+
+ggarrange(plotlist = QCplots, nrow=2, ncol=2)
+(QCplots$lib_size | QCplots$lib_complex | QCplots$n_detected_genes) / QCplots$gene_biotypes
+
+vsd_RNA <- vst(dds_RNA)
+mean_sd_plot(vsd_RNA)
+
+vst <- assay(vst(dds_RNA))
+
+
+#Clustering
+# set seed to control random annotation colors
+set.seed(1)
+plot_sample_clustering(vsd_RNA, anno_vars = c("genotype", "background", "replicate"), distance = "pearson")
+
+RNAseqQC::plot_pca(vsd_RNA, PC_x = 1, PC_y = 2, color_by = "genotype", point_rel_size = 3.5, point_alpha = 0.9)
+RNAseqQC::plot_pca(vsd_RNA, PC_x = 1, PC_y = 2, color_by = "background", point_rel_size = 3.5, point_alpha = 0.9)
+
+RNAseqQC::plot_pca(vsd_RNA, PC_x = 1, PC_y = 3, color_by = "genotype", shape_by = "background", point_rel_size = 3, point_alpha = 0.8)
+RNAseqQC::plot_pca(vsd_RNA, PC_x = 2, PC_y = 3, color_by = "genotype", shape_by = "background", point_rel_size = 3, point_alpha = 0.8)
+RNAseqQC::plot_pca(vsd_RNA, PC_x = 1, PC_y = 4, color_by = "genotype", shape_by = "background", point_rel_size = 3, point_alpha = 0.8)
+```
+
+```{r}
+library('PCAtools')
+
+p <- pca(vst, metadata = sample_info, removeVar = 0)
+screeplot(p, axisLabSize = 18, titleLabSize = 22)
+pairsplot(p, components = 1:4, colby = "genotype", shapekey = "background", legendPosition = "right")
+```
+
+
+```{r}
+dds_RNA <- estimateSizeFactors(dds_RNA)
+plot_gene("MAGEL2", dds_RNA, x_var = "genotype", color_by = "background")
+plot_gene("IL22", dds_RNA, x_var = "genotype", color_by = "background")
+plot_gene("RPH3A", dds_RNA, x_var = "genotype", color_by = "background")
+```
+
+```{r}
+dds_RNA$genotype <- relevel(dds_RNA$genotype, ref = "WT")
+dds_RNA <- DESeq(dds_RNA)
+plotDispEsts(dds_RNA)
+```
+
+##Differential expression analysis
+
+```{r}
+dds_RNA_MGH <- DESeqDataSetFromMatrix(countData = counts_RNA_MGH,
+                                      colData = sample_info_MGH,
+                                      design = ~ genotype)
+dds_RNA_MGH$genotype <- relevel(dds_RNA_MGH$genotype, ref = "WT")
+
+dds_RNA_MGH <- DESeq(dds_RNA_MGH)
+
+comparisons <- resultsNames(dds_RNA_MGH)[2:7] # lists the coefficients
+
+volcano_plot_list_MGH <- list()
+DEG_list_MGH <- list()
+for (comp in comparisons) {
+  resLFC <- lfcShrink(dds_RNA_MGH, coef=comp, type="apeglm")
+  DEG_list_MGH[[comp]] <- resLFC
+  
+  p <- EnhancedVolcano(resLFC,
+    lab = rownames(resLFC),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    FCcutoff = 1.5,
+    legendPosition = 'none',
+    col=c('black', 'black', 'black', 'red3'),
+    colAlpha = 0.8,
+    title = paste(str_split(comp[1], "_")[[1]][2], "versus", str_split(comp[1], "_")[[1]][4]),
+    subtitle = "",
+    caption = bquote(~Log[2]~ "fold change cutoff, 1.5; p-value cutoff, 1e-05"))
+  volcano_plot_list_MGH[[comp]] <- p
+}
+#17 and 9.5
+volcano_plot_list_MGH
+grid.arrange(volcano_plot_list_MGH$genotype_DelC_vs_WT,
+             volcano_plot_list_MGH$genotype_DupC_vs_WT,
+             volcano_plot_list_MGH$genotype_HetDel_vs_WT,
+             volcano_plot_list_MGH$genotype_HomoDel_vs_WT,
+             volcano_plot_list_MGH$genotype_PWSTI_vs_WT,
+             volcano_plot_list_MGH$genotype_PWSTII_vs_WT, nrow=2, ncol=3)
+
+DEG_list_MGH$genotype_DelC_vs_WT[1:50, 1:5]
+```
+
+```{r}
+dds_RNA_8330 <- DESeqDataSetFromMatrix(countData = counts_RNA_8330,
+                                       colData = sample_info_8330,
+                                       design = ~ genotype)
+
+dds_RNA_8330$genotype <- relevel(dds_RNA_8330$genotype, ref = "WT")
+
+dds_RNA_8330 <- DESeq(dds_RNA_8330)
+
+comparisons <- resultsNames(dds_RNA_8330)[2:7] # lists the coefficients
+
+volcano_plot_list_8330 <- list()
+DEG_list_8330 <- list()
+for (comp in comparisons) {
+  resLFC <- lfcShrink(dds_RNA_8330, coef=comp, type="apeglm")
+  DEG_list_8330[[comp]] <- resLFC
+  
+  p <- EnhancedVolcano(resLFC,
+    lab = rownames(resLFC),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    FCcutoff = 1.5,
+    legendPosition = 'none',
+    col=c('black', 'black', 'black', 'red3'),
+    colAlpha = 0.8,
+    title = paste(str_split(comp[1], "_")[[1]][2], "versus", str_split(comp[1], "_")[[1]][4]),
+    subtitle = "",
+    caption = bquote(~Log[2]~ "fold change cutoff, 1.5; p-value cutoff, 1e-05"))
+  volcano_plot_list_8330[[comp]] <- p
+}
+#17 and 9.5
+volcano_plot_list_8330
+grid.arrange(volcano_plot_list_8330$genotype_DelC_vs_WT,
+             volcano_plot_list_8330$genotype_DupC_vs_WT,
+             volcano_plot_list_8330$genotype_HetDel_vs_WT,
+             volcano_plot_list_8330$genotype_HomoDel_vs_WT,
+             volcano_plot_list_8330$genotype_PWSTI_vs_WT,
+             volcano_plot_list_8330$genotype_PWSTII_vs_WT, nrow=2, ncol=3)
+
+DEG_list_8330$genotype_DelC_vs_WT[1:50, 1:5]
+```
+
+
+
+
+
+
+
+
+
+

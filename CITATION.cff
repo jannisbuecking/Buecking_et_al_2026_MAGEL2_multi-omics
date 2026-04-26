@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite the associated manuscript."
+title: "Buecking et al. 2026 MAGEL2 multi-omics analysis code"
+type: software
+authors:
+  - family-names: Buecking
+    given-names: Jannis
+  - family-names: Laugsch
+    given-names: Magdalena
+  - family-names: Schaaf
+    given-names: Christian P.
+repository-code: "https://github.com/jannisbuecking/Buecking_et_al_2026_MAGEL2_multi-omics"
+abstract: "Custom analysis code and associated processed analysis objects for multi-omics profiling of MAGEL2-driven defects in human corticogenesis across Prader-Willi and Schaaf-Yang syndromes."
+license: MIT
+date-released: "2026"
+

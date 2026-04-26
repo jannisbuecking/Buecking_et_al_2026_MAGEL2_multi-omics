@@ -1,0 +1,460 @@
+---
+title: "MAGEL2_interactome"
+output: html_document
+date: "2025-09-02"
+---
+
+
+Importing and converting known MAGEL2 interation partners
+```{r}
+# Install readxl if you haven't already
+# install.packages("readxl")
+
+# Load the required libraries
+library(readxl)
+library(dplyr)
+library(stringr)
+
+# Import the data from the .xlsx file
+file_path <- "MAGEL2_interactionPartners_2025.xlsx"
+magel2_partners <- read_excel(file_path)
+
+# Display the first few rows to confirm it loaded correctly
+head(magel2_partners)
+
+# Define the columns that have the long, descriptive format
+cols_to_process <- c("MAGEL2_C-term", "MAGEL2_Full", "MAGEL2_Full_Stress", "MAGEL2_C-term_Stress")
+
+# Clean the data
+magel2_cleaned <- magel2_partners %>%
+  mutate(across(all_of(cols_to_process), 
+                # For each specified column, try to extract the gene name
+                # If extraction fails (returns NA), keep the original value
+                ~ coalesce(str_extract(., "(?<=GN=)[^ ]+"), .)))
+
+# Display the first few rows of the cleaned data to verify
+head(magel2_cleaned)
+
+
+```
+Define intersections of interest
+```{r}
+intersections_interactors <-
+  list(
+    #single
+    "GFP.MAGEL2.2of3", 
+    "GFP.MAGEL2Q666P.2of3", 
+    "BioID.MAGEL2.2of3",
+    "BioID.MAGEL2Q666P.2of3", 
+    "MAGEL2_C-term", 
+    "MAGEL2_Full",
+    "MAGEL2_Full_Stress",
+    "MAGEL2_C-term_Stress",
+    "Hao et al",
+    "Wijesuriya TM (2017)",
+  
+    #double overlaps
+    c("GFP.MAGEL2.2of3", "GFP.MAGEL2Q666P.2of3"),
+    c("BioID.MAGEL2.2of3","BioID.MAGEL2Q666P.2of3"),
+    c("MAGEL2_C-term", "MAGEL2_Full"),
+    c("MAGEL2_Full_Stress", "MAGEL2_C-term_Stress"),
+    c("Hao et al", "Wijesuriya TM (2017)"),
+      
+    #quadruple overlaps
+    c("GFP.MAGEL2.2of3", "GFP.MAGEL2Q666P.2of3", "BioID.MAGEL2.2of3","BioID.MAGEL2Q666P.2of3"),
+    c("MAGEL2_C-term", "MAGEL2_Full","MAGEL2_Full_Stress", "MAGEL2_C-term_Stress"),
+    
+
+    #BioID overlap
+    c("BioID.MAGEL2.2of3", "BioID.MAGEL2Q666P.2of3", "MAGEL2_C-term", 
+    "MAGEL2_Full"),
+    c("BioID.MAGEL2.2of3","BioID.MAGEL2Q666P.2of3", "MAGEL2_C-term", "MAGEL2_Full","MAGEL2_Full_Stress", "MAGEL2_C-term_Stress"),
+     c("BioID.MAGEL2.2of3","BioID.MAGEL2Q666P.2of3", "MAGEL2_Full_Stress", "MAGEL2_C-term_Stress"),
+    
+    #eight overlap
+    c("GFP.MAGEL2.2of3", "GFP.MAGEL2Q666P.2of3", "BioID.MAGEL2.2of3","BioID.MAGEL2Q666P.2of3", "MAGEL2_C-term", "MAGEL2_Full","MAGEL2_Full_Stress", "MAGEL2_C-term_Stress")
+)
+    
+    
+    
+```
+
+
+```{r}
+# --- 3. PREPARE DATA FOR UPSET PLOT ---
+
+# Convert the data frame into a list of vectors, where each vector is a set of proteins
+# Also, remove any NA values and duplicates within each set
+protein_sets <- lapply(magel2_cleaned, function(col) unique(na.omit(col)))
+
+# Convert the list of sets into a binary data frame suitable for the upset function
+# This format has proteins as rows and sets as columns with TRUE/FALSE values
+upset_data <- fromList(protein_sets)
+
+# Get the names of all the sets (columns) for the plot
+set_names <- colnames(magel2_cleaned)
+
+# Convert the list into the binary data frame that UpSetR requires
+upset_df <- fromList(protein_sets)
+
+#upset(upset_df,
+      #colnames(upset_df),
+      #sort_sets = FALSE)
+
+
+#upset(upset_df,
+      #colnames(upset_df),
+      #sort_sets = FALSE,
+      #intersections = intersections_interactors,
+      #sort_intersections=FALSE
+      #)
+```
+
+List preparation for interaction map
+```{r}
+# --- 1. COMBINE AND CLEAN THE LISTS ---
+
+# Define the columns you want to combine
+columns_to_combine <- c("GFP.MAGEL2.2of3", "MAGEL2_Full", "Wijesuriya TM (2017)", "Hao et al")
+
+# Use dplyr to select the columns, unlist them into a single vector,
+# and then find the unique, non-NA proteins.
+combined_protein_list <- magel2_cleaned %>%
+  dplyr::select(all_of(columns_to_combine)) %>%
+  unlist() %>%
+  unique() %>%
+  na.omit()
+
+# --- 2. VIEW THE RESULT ---
+
+# Print the first few proteins in your new combined list
+cat("First 10 proteins in the combined list:\n")
+print(head(combined_protein_list, 10))
+
+# Print the total number of unique proteins
+cat("\nTotal number of unique proteins in the list:", length(combined_protein_list), "\n")
+
+combined_protein_list_df <- tibble(interactors = combined_protein_list)
+```
+
+
+
+MAGEL2 interactome combined with expression score from proteomics data
+```{r}
+# ==============================================================================
+# Step 1: Setup - Install and Load Necessary Packages
+# ==============================================================================
+# This script uses several packages for data manipulation, network analysis,
+# and visualization. If you haven't installed them yet, uncomment and run
+# the line below.
+
+# install.packages(c("tidyverse", "igraph", "readxl", "STRINGdb", "SummarizedExperiment", "RColorBrewer", "fields"))
+
+# Load the libraries for this session
+library(tidyverse)
+library(igraph)
+library(readxl)
+library(STRINGdb)
+library(SummarizedExperiment)
+library(RColorBrewer) # For the RdBu color palette
+library(fields)       # For the gradient legend
+
+# ==============================================================================
+# Step 2: Load and Process All Proteomics Data
+# ==============================================================================
+# This script assumes 'dep_8330_results_new' and 'dep_MGH_results_new'
+# are already loaded in your R environment.
+
+# --- Define the 6 comparisons vs. WT ---
+comparisons <- c("DelC_vs_WT", "DupC_vs_WT", "HetDel_vs_WT",
+                 "HomoDel_vs_WT", "PWSTI_vs_WT", "PWSTII_vs_WT")
+
+# --- Function to extract and tidy data from a SummarizedExperiment object ---
+tidy_proteomics_data <- function(se_object) {
+  df <- as.data.frame(rowData(se_object)) %>%
+    rownames_to_column("Protein")
+
+  # Select the logFC (diff) and adjusted p-value columns
+  diff_cols <- paste0(comparisons, "_diff")
+  padj_cols <- paste0(comparisons, "_p.adj") # Use p.adj instead of significant
+
+  df %>%
+    dplyr::select(Protein, all_of(diff_cols), all_of(padj_cols)) %>%
+    # Pivot Log2FC columns
+    pivot_longer(
+      cols = all_of(diff_cols),
+      names_to = "comparison_diff",
+      values_to = "Log2FC"
+    ) %>%
+    # Pivot p-value columns
+    pivot_longer(
+      cols = all_of(padj_cols),
+      names_to = "comparison_padj",
+      values_to = "PValue"
+    ) %>%
+    # Clean up comparison names and filter to keep matching pairs
+    dplyr::mutate(
+      comparison_diff = str_remove(comparison_diff, "_diff"),
+      comparison_padj = str_remove(comparison_padj, "_p.adj")
+    ) %>%
+    dplyr::filter(comparison_diff == comparison_padj) %>%
+    # Create the 'Significant' column based on the p-value cutoff
+    dplyr::mutate(Significant = PValue < 0.05) %>%
+    dplyr::select(Protein, Comparison = comparison_diff, Log2FC, Significant)
+}
+
+
+# --- Extract and combine data from both backgrounds ---
+all_proteomics_data <- dplyr::bind_rows(
+  tidy_proteomics_data(dep_8330_results_new),
+  tidy_proteomics_data(dep_MGH_results_new)
+)
+
+# --- Calculate the Regulation Score for each protein ---
+regulation_scores <- all_proteomics_data %>%
+  # Keep only significantly changed results
+  dplyr::filter(Significant == TRUE) %>%
+  # Assign +1 for upregulation, -1 for downregulation
+  dplyr::mutate(score = ifelse(Log2FC > 0, 1, -1)) %>%
+  dplyr::group_by(Protein) %>%
+  # Sum the scores for each protein
+  dplyr::summarise(RegulationScore = sum(score))
+
+# ==============================================================================
+# Step 3: Build Network and Map Regulation Score
+# ==============================================================================
+
+# --- Load the protein interactor list and get interactions from STRING ---
+interactor_data <- read_excel("MAGEL2_interactors_input.xlsx")
+protein_list <- combined_protein_list_df %>% dplyr::pull(1) %>% trimws() %>% unique()
+
+string_db <- STRINGdb$new(version = "11.5", species = 9606, score_threshold = 700)
+map_df <- data.frame(Protein = protein_list)
+mapped_proteins <- string_db$map(map_df, "Protein", removeUnmappedRows = TRUE)
+interactions <- string_db$get_interactions(mapped_proteins$STRING_id)
+
+if (nrow(interactions) == 0) {
+  stop("No interactions found. Try lowering the 'score_threshold'.")
+}
+
+edges <- interactions %>%
+  dplyr::select(from_id = from, to_id = to, weight = combined_score) %>%
+  dplyr::left_join(mapped_proteins, by = c("from_id" = "STRING_id")) %>%
+  dplyr::rename(from_name = Protein) %>%
+  dplyr::left_join(mapped_proteins, by = c("to_id" = "STRING_id")) %>%
+  dplyr::rename(to_name = Protein) %>%
+  dplyr::select(from = from_name, to = to_name, weight) %>%
+  dplyr::filter(from != to, !is.na(from), !is.na(to))
+
+# --- Create the network object ---
+network <- graph_from_data_frame(d = edges, vertices = unique(mapped_proteins$Protein), directed = FALSE)
+network <- igraph::simplify(network)
+network <- delete.vertices(network, V(network)[degree(network) == 0])
+
+# --- Join the regulation scores to the network nodes ---
+node_df <- data.frame(Protein = V(network)$name) %>%
+  dplyr::left_join(regulation_scores, by = "Protein") %>%
+  # If a protein was never significant, its score is 0
+  dplyr::mutate(RegulationScore = tidyr::replace_na(RegulationScore, 0))
+
+V(network)$RegulationScore <- node_df$RegulationScore
+
+# --- Find communities ---
+set.seed(123)
+communities <- cluster_fast_greedy(network)
+V(network)$community <- communities$membership
+
+# ==============================================================================
+# Step 4: Print Community Summary Table
+# ==============================================================================
+# This new step creates and prints a summary table of proteins, their scores,
+# and their assigned community.
+
+community_summary <- data.frame(
+  Protein = V(network)$name,
+  Community = V(network)$community,
+  RegulationScore = V(network)$RegulationScore
+) %>%
+  dplyr::arrange(Community, desc(RegulationScore))
+
+print("--- Community Summary Table ---")
+print(community_summary)
+
+
+# ==============================================================================
+# Step 5: Create Individual Plots for Each Community
+# ==============================================================================
+
+# --- Visualization Parameters ---
+node_size <- 8
+label_font_size <- 0.9
+label_distance <- 1.5
+
+# --- Create your specified color palette ---
+original_brewer_palette <- brewer.pal(n = 10, name = "RdBu")
+
+# Create a lighter subset by removing the darkest color from each end (the 1st and 10th)
+lighter_brewer_subset <- original_brewer_palette[2:9]
+
+# Create the new color ramp function using the lighter subset and then generate 100 colors
+color_palette_adjusted <- colorRampPalette(rev(lighter_brewer_subset))(100)
+
+
+# Set a fixed score limit to intensify colors.
+# Scores outside this range will get the max/min color.
+score_limit <- 12
+color_breaks <- seq(-score_limit, score_limit, length.out = 101)
+
+
+# --- Loop through each community and plot it ---
+community_count <- length(unique(V(network)$community))
+
+# --- Loop through each community and plot it ---
+community_count <- length(unique(V(network)$community))
+
+for (i in 1:community_count) {
+  # Create a subgraph for the current community
+  subgraph <- induced_subgraph(network, V(network)$community == i)
+  
+  # Skip if the community is too small
+  if (gorder(subgraph) < 2) {
+    next
+  }
+  
+  # --- Assign colors to the subgraph nodes ---
+  # Clamp scores to the fixed limit for color mapping
+  scores_clamped <- V(subgraph)$RegulationScore
+  scores_clamped[scores_clamped > score_limit] <- score_limit
+  scores_clamped[scores_clamped < -score_limit] <- -score_limit
+  
+  node_colors <- color_palette_adjusted[cut(scores_clamped, breaks = color_breaks, include.lowest = TRUE)]
+  node_colors[is.na(node_colors)] <- "grey" # Set nodes with no data to grey
+  
+  # --- NEW: Add transparency to the node colors ---
+  # The alpha.f argument controls transparency (0=transparent, 1=opaque)
+  node_colors_transparent <- adjustcolor(node_colors, alpha.f = 0.8)
+  
+  # --- Plot the subgraph ---
+  set.seed(123)
+  plot(
+    subgraph,
+    layout = layout_with_kk,
+    vertex.color = node_colors_transparent, # Use the new transparent colors
+    vertex.frame.color = NA,               # --- NEW: This removes the node outline ---
+    vertex.size = node_size,
+    vertex.label = V(subgraph)$name,
+    vertex.label.cex = label_font_size,
+    vertex.label.color = "black",
+    vertex.label.dist = label_distance,
+    edge.width = 1.5,
+    edge.color = "lightgrey"
+  )
+  
+  # --- Add Title and a true gradient Legend ---
+  title(paste("Community", i, "- Regulation Score"), cex.main = 1.2)
+  
+  # Use image.plot from the 'fields' package to create a gradient legend
+  image.plot(
+    legend.only = TRUE,
+    zlim = c(-score_limit, score_limit),
+    col = color_palette_adjusted,
+    legend.shrink = 0.4,
+    legend.width = 0.8,
+    legend.mar = 3,
+    axis.args = list(at = c(-score_limit, 0, score_limit), labels = c(paste("<", -score_limit), 0, paste(">", score_limit)), cex.axis = 0.8),
+    legend.args = list(text = "Regulation Score", side = 3, font = 2, cex = 0.8)
+  )
+}
+```
+Number of proteins
+```{r}
+# 1. Total unique proteins in your original mapping/data
+total_mapped_proteins <- length(unique(mapped_proteins$Protein))
+
+# 2. Total proteins included in the network object
+# (This includes those with and without edges)
+total_in_network <- vcount(network)
+
+# 3. Proteins actually plotted 
+# (Usually means proteins that have at least one connection/edge)
+proteins_with_edges <- sum(degree(network) > 0)
+
+# --- Print the Results ---
+cat("Total proteins in original data: ", total_mapped_proteins, "\n")
+cat("Proteins included in network object: ", total_in_network, "\n")
+cat("Proteins actually plotted (with connections): ", proteins_with_edges, "\n")
+
+
+
+
+# Get the names of proteins in the original list vs the network
+original_names <- unique(mapped_proteins$Protein)
+network_names <- V(network)$name
+
+# Find proteins that are in the original list but NOT in the network
+missing_proteins <- setdiff(original_names, network_names)
+
+# View the missing list
+print(missing_proteins)
+
+
+```
+
+
+
+Export list of MAGEL2 interaction partners
+```{r}
+# ==============================================================================
+# EXPORT CLEANED MAGEL2 INTERACTION PARTNERS TO XLSX
+# ==============================================================================
+
+# Ensure the 'openxlsx' library is loaded
+# install.packages("openxlsx") # Run this line if you don't have it installed
+library(openxlsx)
+
+# Define the output file name
+output_file_name <- "MAGEL2_interactionPartners_cleaned.xlsx"
+
+# Write the 'magel2_cleaned' data frame to the specified Excel file
+write.xlsx(
+  magel2_cleaned, 
+  file = output_file_name,
+  rowNames = FALSE, # Typically not needed for this kind of data
+  overwrite = TRUE  # This will replace the file if it already exists
+)
+
+# Print a confirmation message to the console
+message(paste("Successfully exported the cleaned data to:", output_file_name))
+```
+
+
+
+Export interactome communities with expression score
+```{r}
+# ==============================================================================
+# Step 6: EXPORT NETWORK ANALYSIS RESULTS TO XLSX
+# ==============================================================================
+
+# Ensure the 'openxlsx' library is loaded
+# install.packages("openxlsx") # Run this line if you don't have it installed
+library(openxlsx)
+
+# --- Create a named list where each element is a data frame for a sheet ---
+# We will export the community summary table and the list of network edges.
+list_for_export <- list(
+  "Community_Summary" = community_summary,
+  "Interaction_Edges" = edges
+)
+
+# --- Write the list to a single .xlsx file ---
+write.xlsx(
+  list_for_export, 
+  file = "Network_Analysis_Summary.xlsx",
+  rowNames = FALSE,
+  overwrite = TRUE
+)
+
+# --- Print a confirmation message ---
+message("Successfully exported network analysis results to 'Network_Analysis_Summary.xlsx'")
+```
+

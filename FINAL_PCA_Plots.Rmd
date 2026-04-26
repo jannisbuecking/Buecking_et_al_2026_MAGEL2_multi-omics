@@ -1,0 +1,711 @@
+---
+title: "PCA_Plots"
+output: html_document
+date: "2025-04-09"
+---
+
+```{r}
+    # Load necessary libraries 
+    library(ggplot2)
+    library(dplyr)
+    library(SummarizedExperiment)
+    library(DESeq2)             
+    library(stringr)            
+    library(patchwork)          
+
+    # --- Standardization Settings ---
+    # Define a common theme for all PCA plots
+    common_pca_theme <- theme_minimal(base_size = 12) 
+      theme(
+        legend.position = "right",
+        panel.grid = element_blank(),             
+        axis.line = element_line(color = "black"), 
+        plot.title = element_text(hjust = 0.5, face = "bold", size = rel(1.2)), 
+        axis.title = element_text(size = rel(1)), 
+        legend.title = element_text(size = rel(1)),
+        legend.text = element_text(size = rel(0.9)) 
+      )
+
+    # Define a common point size
+    common_point_size <- 6
+```
+
+
+    
+```{r}
+   
+ # --- RNA-seq PCA ---
+    message("--- Processing RNA-seq Data ---")
+
+    # --- USER: Adjust file path for the RAW count matrix RDS ---
+    raw_counts_rds_file <- "count_matrix_RNAseq_MAGEL2_project.rds" # As named in original script
+
+    if (!file.exists(raw_counts_rds_file)) {
+      stop("RAW RNA-seq count matrix file not found: ", raw_counts_rds_file)
+    }
+
+    # --- Step 1: Load Raw Counts ---
+    counts_RNA_subread <- readRDS(file = raw_counts_rds_file)
+    counts_RNA <- counts_RNA_subread$counts # Extract counts matrix
+
+    # --- Step 2: Clean Column Names ---
+    original_colnames <- colnames(counts_RNA)
+    for (i in 1:ncol(counts_RNA)) {
+      colnames(counts_RNA)[i] <-
+        str_replace(string = colnames(counts_RNA)[i],
+                    pattern = ".bam",
+                    replacement = "")
+
+      colnames(counts_RNA)[i] <-
+        str_replace(string = colnames(counts_RNA)[i],
+                    pattern = "GM08330",
+                    replacement = "8330")
+
+      colnames(counts_RNA)[i] <-
+        str_replace(string = colnames(counts_RNA)[i],
+                    pattern = "MGH2069",
+                    replacement = "MGH")
+
+      colnames(counts_RNA)[i] <-
+        str_replace(string = colnames(counts_RNA)[i],
+                    pattern = "PSWT",
+                    replacement = "PWST") # Corrected typo based on original code
+    }
+    message("Cleaned RNA-seq column names.")
+
+    # --- Step 3: Create Metadata ---
+    sample_info_rna <- data.frame(row.names = colnames(counts_RNA),
+                                  background = c(rep("8330", 21), rep("MGH", 21)),
+                                  genotype = c(rep("DelC", 3), rep("DupC", 3), rep("HetDel", 3),
+                                               rep("HomoDel", 3), rep("WT", 3), rep("PWSTII", 3), rep("PWSTI", 3),
+                                               rep("PWSTI", 3), rep("PWSTII", 3), rep("DelC", 3), rep("DupC", 3),
+                                               rep("HetDel", 3), rep("HomoDel", 3), rep("WT", 3)),
+                                  replicate = rep(c(1,2,3), 14))
+
+    if (!all(rownames(sample_info_rna) == colnames(counts_RNA))) {
+        stop("Mismatch between cleaned RNA column names and metadata rownames.")
+    }
+
+    sample_info_rna$background <- as.factor(sample_info_rna$background)
+    sample_info_rna$genotype <- as.factor(sample_info_rna$genotype)
+    sample_info_rna$replicate <- as.factor(sample_info_rna$replicate)
+    message("Created RNA-seq metadata.")
+
+    # --- Step 4: Create DESeqDataSet Object ---
+    counts_RNA_int <- round(counts_RNA) # Ensure counts are integers
+    dds_RNA <- DESeqDataSetFromMatrix(countData = counts_RNA_int,
+                                      colData = sample_info_rna,
+                                      design = ~ background + genotype)
+    message("Created DESeqDataSet object.")
+
+    # --- Step 5: Apply Variance Stabilizing Transformation ---
+    vsd_RNA <- vst(dds_RNA, blind = TRUE)
+    message("VST transformation complete.")
+
+    # --- Step 6: Perform PCA ---
+    expression_matrix_rna <- assay(vsd_RNA)
+    pca_rna <- prcomp(t(expression_matrix_rna), scale. = TRUE)
+    pca_rna_df <- data.frame(pca_rna$x, colData(vsd_RNA)) # Combine PCA results and metadata
+
+    # Calculate variance explained
+    pca_rna_var <- pca_rna$sdev^2
+    pca_rna_var_perc <- round(pca_rna_var / sum(pca_rna_var) * 100, 1)
+
+    # Axis labels
+    xlab_rna <- paste0("PC1 (", pca_rna_var_perc[1], "%)")
+    ylab_rna <- paste0("PC2 (", pca_rna_var_perc[2], "%)")
+
+  # --- Step 7: Generate Standardized Plots ---
+# Plot 1: Colored by genotype
+pca_rna_plot_genotype <- ggplot(pca_rna_df, aes(x = PC1, y = PC2, fill = genotype, color = genotype)) +
+  geom_point(shape = 21, size = common_point_size, alpha = 0.7) +
+  common_pca_theme +
+  xlab(xlab_rna) +
+  ylab(ylab_rna) +
+  ggtitle("RNA-seq PCA by Genotype") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7))) # Match legend to points
+
+# Plot 2: Colored by background
+pca_rna_plot_background <- ggplot(pca_rna_df, aes(x = PC1, y = PC2, fill = background, color = background)) +
+  geom_point(shape = 21, size = common_point_size, alpha = 0.7) +
+  common_pca_theme +
+  xlab(xlab_rna) +
+  ylab(ylab_rna) +
+  ggtitle("RNA-seq PCA by Background") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7))) # Match legend to points
+
+# Display or save the plots
+print(pca_rna_plot_genotype)
+print(pca_rna_plot_background)
+
+# Optional: Combine plots using patchwork
+rna_combined_plot <- pca_rna_plot_genotype + pca_rna_plot_background +
+  plot_layout(guides = 'collect') + # Collect legends together
+  plot_annotation(title = 'RNA-seq PCA Analysis', theme = theme(plot.title = element_text(hjust = 0.5, face="bold")))
+print(rna_combined_plot)
+```
+ RNAseq: PC3
+```{r}
+# Add a sample column if useful for labeling
+pca_rna_df$sample <- rownames(pca_rna_df)
+
+# Label for PC3
+pc3_lab <- paste0("PC3 (", pca_rna_var_perc[3], "%)")
+
+# Plot PC3 only, colored by genotype
+pca_rna_plot_pc3 <- ggplot(pca_rna_df, aes(x = genotype, y = PC3, fill = genotype, color = genotype)) +
+  geom_jitter(width = 0.15, size = common_point_size, alpha = 0.7, shape = 21) +
+  common_pca_theme +
+  xlab("Genotype") +
+  ylab(pc3_lab) +
+  ggtitle("RNA-seq PCA: PC3 scores by Genotype") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7)))
+
+print(pca_rna_plot_pc3)
+
+# Label for PC3
+pc3_lab <- paste0("PC3 (", pca_rna_var_perc[3], "%)")
+
+# Optional sample names
+pca_rna_df$sample <- rownames(pca_rna_df)
+
+# All samples in one column
+pca_rna_plot_pc3_one_column <- ggplot(
+  pca_rna_df,
+  aes(x = "All samples", y = PC3, fill = genotype, color = genotype)
+) +
+  geom_jitter(width = 0.08, size = common_point_size, alpha = 0.7, shape = 21) +
+  common_pca_theme +
+  xlab("") +
+  ylab(pc3_lab) +
+  ggtitle("RNA-seq PCA: PC3") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7)))
+
+print(pca_rna_plot_pc3_one_column)
+```
+ 
+ 
+       
+```{r}
+# --- Proteomics PCA ---
+# Adapted from user-provided working example
+
+# Load necessary libraries (ensure these are installed)
+library(ggplot2)
+library(dplyr)
+library(SummarizedExperiment) # For assay()
+library(patchwork)          # For combining plots (optional)
+
+message("--- Processing Proteomics Data (User-Provided Logic) ---")
+
+# --- Standardization Settings (Copied for standalone use) ---
+# Define a common theme for all PCA plots
+common_pca_theme <- theme_minimal(base_size = 12) + # Set base font size
+  theme(
+    legend.position = "right",
+    panel.grid = element_blank(),             # Remove grid lines
+    axis.line = element_line(color = "black"), # Add axis lines
+    plot.title = element_text(hjust = 0.5, face = "bold", size = rel(1.2)), # Centered, bold title
+    axis.title = element_text(size = rel(1)), # Axis titles
+    legend.title = element_text(size = rel(1)), # Legend title
+    legend.text = element_text(size = rel(0.9)) # Legend text
+  )
+
+# Define a common point size
+common_point_size <- 6
+
+
+# --- USER: Adjust file paths ---
+proteomics_rds_8330 <- "new_data_imp_8330_BH_new.rds"
+proteomics_rds_MGH <- "new_data_imp_MGH_BH_new.rds"
+proteomics_metadata_rds <- "proteomics_sample_info.rds"
+
+if (!file.exists(proteomics_rds_8330) || !file.exists(proteomics_rds_MGH) || !file.exists(proteomics_metadata_rds)) {
+  stop("One or more Proteomics input files not found.")
+}
+
+# --- Step 1: Load Data ---
+new_data_imp_8330 <- readRDS(file = proteomics_rds_8330)
+new_data_imp_MGH <- readRDS(file = proteomics_rds_MGH)
+# Rename variable to avoid potential conflicts if run with other code
+experimental_design_prot <- readRDS(file = proteomics_metadata_rds)
+
+# --- Step 2: Prepare Data ---
+# Extract abundance data and gene names
+abundance_8330 <- assay(new_data_imp_8330)
+abundance_MGH <- assay(new_data_imp_MGH)
+genes_8330 <- rownames(abundance_8330)
+genes_MGH <- rownames(abundance_MGH)
+
+# Find common genes
+genes_overlap_prot <- intersect(genes_8330, genes_MGH)
+message(paste("Found", length(genes_overlap_prot), "common genes/proteins."))
+
+# Subset abundance matrices to common genes
+abundance_8330_overlap <- abundance_8330[genes_overlap_prot, , drop = FALSE] # Use drop=FALSE
+abundance_MGH_overlap <- abundance_MGH[genes_overlap_prot, , drop = FALSE] # Use drop=FALSE
+
+# Prepare sample information (filter metadata)
+sample_info_8330_prot <- experimental_design_prot[experimental_design_prot$background == "GM", ]
+sample_info_MGH_prot <- experimental_design_prot[experimental_design_prot$background == "MG", ]
+
+# Combine abundance data using simple cbind (relies on implicit order)
+# NOTE: This assumes the column order in the original subsetted matrices
+# matches the row order of the filtered metadata.
+abundance_combined_prot <- cbind(abundance_8330_overlap, abundance_MGH_overlap)
+message(paste("Combined abundance matrix dimensions:", nrow(abundance_combined_prot), "rows,", ncol(abundance_combined_prot), "cols"))
+
+# Combine sample information
+sample_info_combined_prot <- rbind(sample_info_8330_prot, sample_info_MGH_prot)
+message(paste("Combined metadata dimensions:", nrow(sample_info_combined_prot), "rows"))
+
+
+# Ensure column names match metadata sample names by assigning them
+# NOTE: This overrides original column names and might mask ordering issues.
+if (ncol(abundance_combined_prot) == nrow(sample_info_combined_prot)) {
+    colnames(abundance_combined_prot) <- sample_info_combined_prot$name
+    message("Assigned column names from metadata to combined abundance matrix.")
+} else {
+    stop(paste("Column count mismatch:", ncol(abundance_combined_prot), "cols in abundance vs", nrow(sample_info_combined_prot), "rows in metadata. Cannot assign names."))
+}
+
+message("Prepared combined proteomics data.")
+
+# --- Step 3: Perform PCA ---
+# NOTE: Using the logic from the user-provided snippet.
+# This version does NOT filter for zero-variance features.
+# The 'cannot rescale a constant/zero column' error might reappear if
+# zero-variance features exist in this combined dataset.
+
+# Ensure no missing values in the data matrix intended for PCA
+if (any(is.na(abundance_combined_prot))) {
+    stop("Missing values (NA) detected in the proteomics abundance matrix. Imputation or filtering needed before PCA.")
+    # Add alternative NA handling here if needed (imputation, removal)
+}
+
+# Check if any rows remain (should generally be true unless overlap is empty)
+if (nrow(abundance_combined_prot) == 0) {
+    stop("No proteins/genes in the combined matrix (common overlap is empty?). Cannot perform PCA.")
+}
+# Check if enough columns (samples) remain
+if (ncol(abundance_combined_prot) < 2) {
+    stop("Fewer than 2 samples in the combined matrix. Cannot perform PCA.")
+}
+
+# Perform PCA directly on the combined data
+message("Performing PCA on combined proteomics data...")
+# Using variable names from user snippet for PCA result and data frame
+pca_combined <- prcomp(t(abundance_combined_prot), scale. = TRUE)
+
+# Combine PCA results with the sample info
+# Using variable names from user snippet
+pca_df <- data.frame(pca_combined$x, sample_info_combined_prot)
+
+# Calculate variance explained
+pca_prot_var <- pca_combined$sdev^2
+pca_prot_var_perc <- round(pca_prot_var / sum(pca_prot_var) * 100, 1)
+
+# Axis labels
+xlab_prot <- paste0("PC1 (", pca_prot_var_perc[1], "%)")
+ylab_prot <- paste0("PC2 (", pca_prot_var_perc[2], "%)")
+
+# --- Step 4: Generate Standardized Plots ---
+# Plot 1: Colored by condition
+pca_plot_condition <- ggplot(pca_df, aes(x = PC1, y = PC2, fill = condition, color = condition)) +
+  geom_point(shape = 21, size = common_point_size, alpha = 0.7) + # Use fillable shape & transparency
+  common_pca_theme +
+  xlab(xlab_prot) +
+  ylab(ylab_prot) +
+  ggtitle("Proteomics PCA by Condition") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7))) # Match legend to points
+
+# Plot 2: Colored by background
+pca_plot_background <- ggplot(pca_df, aes(x = PC1, y = PC2, fill = background, color = background)) +
+  geom_point(shape = 21, size = common_point_size, alpha = 0.7) + # Use fillable shape & transparency
+  common_pca_theme +
+  xlab(xlab_prot) +
+  ylab(ylab_prot) +
+  ggtitle("Proteomics PCA by Background") +
+  guides(fill = guide_legend(override.aes = list(shape = 21, alpha = 0.7))) # Match legend to points
+
+# Display the plots
+print(pca_plot_condition)
+print(pca_plot_background)
+
+# Optional: Combine plots using patchwork
+prot_combined_plot <- pca_plot_condition + pca_plot_background +
+  plot_layout(guides = 'collect') +
+  plot_annotation(title = 'Proteomics PCA Analysis', theme = theme(plot.title = element_text(hjust = 0.5, face="bold")))
+print(prot_combined_plot)
+# ggsave("Proteomics_PCA_Combined.png", prot_combined_plot, width = 10, height = 5)
+
+message("--- Proteomics PCA Plot Generation Complete ---")
+```
+
+
+
+
+```{r}
+# --- Ubiquitylation PCA ---
+# Adapted using the same logic as the reverted Proteomics section
+
+# Load necessary libraries (ensure these are installed)
+library(ggplot2)
+library(dplyr)
+library(SummarizedExperiment) # For assay()
+library(patchwork)          # For combining plots (optional)
+
+message("--- Processing Ubiquitylation Data (User-Provided Logic) ---")
+
+# --- Standardization Settings (Copied for standalone use) ---
+# Define a common theme for all PCA plots
+common_pca_theme <- theme_minimal(base_size = 12) + # Set base font size
+  theme(
+    legend.position = "right",
+    panel.grid = element_blank(),             # Remove grid lines
+    axis.line = element_line(color = "black"), # Add axis lines
+    plot.title = element_text(hjust = 0.5, face = "bold", size = rel(1.2)), # Centered, bold title
+    axis.title = element_text(size = rel(1)), # Axis titles
+    legend.title = element_text(size = rel(1)), # Legend title
+    legend.text = element_text(size = rel(0.9)) # Legend text
+  )
+
+# Define a common point size
+common_point_size <- 6
+
+# --- USER: Adjust file paths ---
+ubi_rds_8330 <- "Ubi_data_imp_8330_BH_new.rds"
+ubi_rds_MGH <- "Ubi_data_imp_MGH_BH_new.rds"
+ubi_metadata_rds <- "UbiEAs_sample_info.rds" # Corrected filename from original user code
+
+if (!file.exists(ubi_rds_8330) || !file.exists(ubi_rds_MGH) || !file.exists(ubi_metadata_rds)) {
+  stop("One or more Ubiquitylation input files not found.")
+}
+
+# --- Step 1: Load Data ---
+Ubi_data_imp_8330 <- readRDS(file = ubi_rds_8330)
+Ubi_data_imp_MGH <- readRDS(file = ubi_rds_MGH)
+experimental_design_ubi <- readRDS(file = ubi_metadata_rds)
+
+# --- Step 2: Prepare Data ---
+# Extract abundance data and site names (assuming rows are sites/peptides)
+abundance_8330_ubi <- assay(Ubi_data_imp_8330)
+abundance_MGH_ubi <- assay(Ubi_data_imp_MGH)
+sites_8330_ubi <- rownames(abundance_8330_ubi)
+sites_MGH_ubi <- rownames(abundance_MGH_ubi)
+
+# Find common sites/peptides
+sites_overlap_ubi <- intersect(sites_8330_ubi, sites_MGH_ubi)
+message(paste("Found", length(sites_overlap_ubi), "common ubiquitylation sites/peptides."))
+
+
+# Subset abundance matrices to common sites
+abundance_8330_overlap_ubi <- abundance_8330_ubi[sites_overlap_ubi, , drop = FALSE] # Use drop=FALSE
+abundance_MGH_overlap_ubi <- abundance_MGH_ubi[sites_overlap_ubi, , drop = FALSE] # Use drop=FALSE
+
+# Prepare sample information (filter metadata)
+# Assuming 'background' column uses "GM" and "MG" codes
+sample_info_8330_ubi <- experimental_design_ubi[experimental_design_ubi$background == "GM", ]
+sample_info_MGH_ubi <- experimental_design_ubi[experimental_design_ubi$background == "MG", ]
+
+# Combine abundance data using simple cbind (relies on implicit order)
+# NOTE: This assumes the column order in the original subsetted matrices
+# matches the row order of the filtered metadata.
+abundance_combined_ubi <- cbind(abundance_8330_overlap_ubi, abundance_MGH_overlap_ubi)
+message(paste("Combined ubiquitylation matrix dimensions:", nrow(abundance_combined_ubi), "rows,", ncol(abundance_combined_ubi), "cols"))
+
+
+# Combine sample information
+sample_info_combined_ubi <- rbind(sample_info_8330_ubi, sample_info_MGH_ubi)
+message(paste("Combined ubiquitylation metadata dimensions:", nrow(sample_info_combined_ubi), "rows"))
+
+
+# Ensure column names match metadata sample names by assigning them
+# NOTE: This overrides original column names and might mask ordering issues.
+if (ncol(abundance_combined_ubi) == nrow(sample_info_combined_ubi)) {
+    colnames(abundance_combined_ubi) <- sample_info_combined_ubi$name
+    message("Assigned column names from metadata to combined ubiquitylation matrix.")
+} else {
+     stop(paste("Column count mismatch:", ncol(abundance_combined_ubi), "cols in abundance vs", nrow(sample_info_combined_ubi), "rows in metadata. Cannot assign names."))
+}
+
+message("Prepared combined ubiquitylation data.")
+
+# --- Step 3: Perform PCA ---
+# NOTE: Using the logic adapted from the user-provided snippet.
+# This version does NOT filter for zero-variance features.
+# The 'cannot rescale a constant/zero column' error might reappear if
+# zero-variance features exist in this combined dataset.
+
+# Ensure no missing values in the data matrix intended for PCA
+if (any(is.na(abundance_combined_ubi))) {
+    stop("Missing values (NA) detected in the ubiquitylation abundance matrix. Imputation or filtering needed before PCA.")
+    # Add alternative NA handling here if needed (imputation, removal)
+}
+
+# Check if any rows remain (should generally be true unless overlap is empty)
+if (nrow(abundance_combined_ubi) == 0) {
+    stop("No ubiquitylation sites in the combined matrix (common overlap is empty?). Cannot perform PCA.")
+}
+# Check if enough columns (samples) remain
+if (ncol(abundance_combined_ubi) < 2) {
+    stop("Fewer than 2 samples in the combined ubiquitylation matrix. Cannot perform PCA.")
+}
+
+# Perform PCA directly on the combined data
+message("Performing PCA on combined ubiquitylation data...")
+pca_combined_ubi <- prcomp(t(abundance_combined_ubi), scale. = TRUE)
+
+# Combine PCA results with the sample info
+pca_ubi_df <- data.frame(pca_combined_ubi$x, sample_info_combined_ubi)
+
+# Calculate variance explained
+pca_ubi_var <- pca_combined_ubi$sdev^2
+pca_ubi_var_perc <- round(pca_ubi_var / sum(pca_ubi_var) * 100, 1)
+
+# Axis labels
+xlab_ubi <- paste0("PC1 (", pca_ubi_var_perc[1], "%)")
+ylab_ubi <- paste0("PC2 (", pca_ubi_var_perc[2], "%)")
+
+# --- Step 4: Generate Standardized Plots ---
+# Plot 1: Colored by condition
+pca_ubi_plot_condition <- ggplot(pca_ubi_df, aes(x = PC1, y = PC2, color = condition)) +
+  geom_point(size = common_point_size) + # Use common standardized size
+  common_pca_theme +                     # Use common standardized theme
+  xlab(xlab_ubi) +
+  ylab(ylab_ubi) +
+  ggtitle("Ubiquitylation PCA by Condition")
+
+# Plot 2: Colored by background
+pca_ubi_plot_background <- ggplot(pca_ubi_df, aes(x = PC1, y = PC2, color = background)) +
+  geom_point(size = common_point_size) + # Use common standardized size
+  common_pca_theme +                     # Use common standardized theme
+  xlab(xlab_ubi) +
+  ylab(ylab_ubi) +
+  ggtitle("Ubiquitylation PCA by Background")
+
+# Display the plots
+print(pca_ubi_plot_condition)
+print(pca_ubi_plot_background)
+
+# Optional: Combine plots using patchwork
+ubi_combined_plot <- pca_ubi_plot_condition + pca_ubi_plot_background +
+  plot_layout(guides = 'collect') +
+  plot_annotation(title = 'Ubiquitylation PCA Analysis', theme = theme(plot.title = element_text(hjust = 0.5, face="bold")))
+print(ubi_combined_plot)
+
+message("--- Ubiquitylation PCA Plot Generation Complete ---")
+```
+
+
+```{r}
+# --- Add-on: RNA-seq PCA with Marginal Densities (WT vs. Mutant) ---
+message("--- Generating RNA-seq Marginal Density Plot ---")
+
+# Load the new library
+library(ggExtra)
+
+# --- Step 1: Create the WT vs. Mutant Grouping ---
+# Uses the 'pca_rna_df' created by your script
+pca_rna_df_grouped <- pca_rna_df %>%
+  mutate(group = factor(ifelse(genotype == "WT", "WT", "Mutant")))
+
+# --- Step 2: Create the Base Scatter Plot ---
+# We map the new 'group' column to 'color'
+# (Using xlab_rna and ylab_rna from your script)
+p_rna_base <- ggplot(pca_rna_df_grouped, aes(x = PC1, y = PC2, color = group)) +
+  geom_point(size = common_point_size, alpha = 0.7) +
+  common_pca_theme +
+  ggtitle("RNA-seq PCA (WT vs. Mutants)") +
+  xlab(xlab_rna) +
+  ylab(ylab_rna) +
+  scale_color_brewer(palette = "Set1") # Use distinct colors for groups
+
+# --- Step 3: Generate and Print the Marginal Density Plot ---
+rna_marginal_plot <- ggMarginal(
+  p_rna_base,
+  type = "density",
+  groupColour = TRUE, # Tell ggMarginal to use the 'color = group' mapping
+  groupFill = TRUE,   # Tell ggMarginal to fill the densities
+  alpha = 0.4         # Set transparency for the density fills
+)
+
+print(rna_marginal_plot)
+# ggsave("RNAseq_PCA_Marginal_Density.png", rna_marginal_plot, width = 8, height = 8)
+
+
+# --- Add-on: Proteomics PCA with Marginal Densities (WT vs. Mutant) ---
+message("--- Generating Proteomics Marginal Density Plot ---")
+
+# Load the new library
+library(ggExtra)
+
+# --- Step 1: Create the WT vs. Mutant Grouping ---
+# Uses the 'pca_df' created by your script
+pca_prot_df_grouped <- pca_df %>%
+  mutate(group = factor(ifelse(condition == "WT", "WT", "Mutant")))
+
+# --- Step 2: Create the Base Scatter Plot ---
+# We map the new 'group' column to 'color'
+# (Using xlab_prot and ylab_prot from your script)
+p_prot_base <- ggplot(pca_prot_df_grouped, aes(x = PC1, y = PC2, color = group)) +
+  geom_point(size = common_point_size, alpha = 0.7) +
+  common_pca_theme +
+  ggtitle("Proteomics PCA (WT vs. Mutants)") +
+  xlab(xlab_prot) +
+  ylab(ylab_prot) +
+  scale_color_brewer(palette = "Set1") # Use distinct colors for groups
+
+# --- Step 3: Generate and Print the Marginal Density Plot ---
+prot_marginal_plot <- ggMarginal(
+  p_prot_base,
+  type = "density",
+  groupColour = TRUE, # Use the 'color = group' mapping
+  groupFill = TRUE,   # Fill the densities
+  alpha = 0.4         # Set transparency
+)
+
+print(prot_marginal_plot)
+# ggsave("Proteomics_PCA_Marginal_Density.png", prot_marginal_plot, width = 8, height = 8)
+
+
+
+
+# --- Add-on: Ubiquitylation PCA with Marginal Densities (WT vs. Mutant) ---
+message("--- Generating Ubiquitylation Marginal Density Plot ---")
+
+# Load the new library
+library(ggExtra)
+
+# --- Step 1: Create the WT vs. Mutant Grouping ---
+# Uses the 'pca_ubi_df' created by your script
+pca_ubi_df_grouped <- pca_ubi_df %>%
+  mutate(group = factor(ifelse(condition == "WT", "WT", "Mutant")))
+
+# --- Step 2: Create the Base Scatter Plot ---
+# We map the new 'group' column to 'color'
+# (Using xlab_ubi and ylab_ubi from your script)
+p_ubi_base <- ggplot(pca_ubi_df_grouped, aes(x = PC1, y = PC2, color = group)) +
+  geom_point(size = common_point_size, alpha = 0.7) +
+  common_pca_theme +
+  ggtitle("Ubiquitylation PCA (WT vs. Mutants)") +
+  xlab(xlab_ubi) +
+  ylab(ylab_ubi) +
+  scale_color_brewer(palette = "Set1") # Use distinct colors for groups
+
+# --- Step 3: Generate and Print the Marginal Density Plot ---
+ubi_marginal_plot <- ggMarginal(
+  p_ubi_base,
+  type = "density",
+  groupColour = TRUE, # Use the 'color = group' mapping
+  groupFill = TRUE,   # Fill the densities
+  alpha = 0.4         # Set transparency
+)
+
+print(ubi_marginal_plot)
+# ggsave("Ubiquitylation_PCA_Marginal_Density.png", ubi_marginal_plot, width = 8, height = 8)
+```
+
+
+```{r}
+# --- RNA-seq: Combined PCA (Genotype + Background) ---
+
+# Define the shape mapping: 8330 = ▼ (fillable triangle), MGH = ● (fillable circle)
+shape_map_rna <- c("8330" = 25, "MGH" = 21)
+
+pca_rna_combined_plot <- ggplot(pca_rna_df, aes(x = PC1, y = PC2, fill = genotype, color = genotype, shape = background)) +
+  # Map 'color' to 'genotype' and remove static color setting
+  geom_point(size = common_point_size, alpha = 0.8) +
+  
+  # Apply the custom shape mapping
+  scale_shape_manual(values = shape_map_rna, name = "Background") +
+  
+  # Label the fill legend correctly
+  scale_fill_discrete(name = "Genotype") +
+  # Add a matching color scale
+  scale_color_discrete(name = "Genotype") +
+  
+  # Apply the common theme
+  common_pca_theme +
+  xlab(xlab_rna) +
+  ylab(ylab_rna) +
+  ggtitle("RNA-seq PCA by Genotype and Background") +
+  
+  # Tidy the legend
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, size = 5)),
+    color = "none" # Hide the redundant color legend
+  )
+
+print(pca_rna_combined_plot)
+```
+
+
+```{r}
+# --- Proteomics: Combined PCA (Condition + Background) ---
+
+# Define the shape mapping: GM = ▼ (fillable triangle), MG = ● (fillable circle)
+shape_map_prot <- c("GM" = 25, "MG" = 21)
+
+pca_prot_combined_plot <- ggplot(pca_df, aes(x = PC1, y = PC2, fill = condition, color = condition, shape = background)) +
+  # Map 'color' to 'condition'
+  geom_point(size = common_point_size, alpha = 0.8) +
+  
+  # Apply the custom shape mapping
+  scale_shape_manual(values = shape_map_prot, name = "Background") +
+  
+  # Label the fill legend correctly
+  scale_fill_discrete(name = "Condition") +
+  # Add a matching color scale
+  scale_color_discrete(name = "Condition") +
+  
+  # Apply the common theme
+  common_pca_theme +
+  xlab(xlab_prot) +
+  ylab(ylab_prot) +
+  ggtitle("Proteomics PCA by Condition and Background") +
+  
+  # Tidy the legend
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, size = 5)),
+    color = "none" # Hide the redundant color legend
+  )
+
+print(pca_prot_combined_plot)
+```
+
+
+```{r}
+# --- Ubiquitylation: Combined PCA (Condition + Background) ---
+
+# Define the shape mapping: GM = ▼ (fillable triangle), MG = ● (fillable circle)
+shape_map_ubi <- c("GM" = 25, "MG" = 21)
+
+pca_ubi_combined_plot <- ggplot(pca_ubi_df, aes(x = PC1, y = PC2, fill = condition, color = condition, shape = background)) +
+  # Map 'color' to 'condition'
+  geom_point(size = common_point_size, alpha = 0.8) +
+  
+  # Apply the custom shape mapping
+  scale_shape_manual(values = shape_map_ubi, name = "Background") +
+  
+  # Label the fill legend correctly
+  scale_fill_discrete(name = "Condition") +
+  # Add a matching color scale
+  scale_color_discrete(name = "Condition") +
+  
+  # Apply the common theme
+  common_pca_theme +
+  xlab(xlab_ubi) +
+  ylab(ylab_ubi) +
+  ggtitle("Ubiquitylation PCA by Condition and Background") +
+  
+  # Tidy the legend
+  guides(
+    fill = guide_legend(override.aes = list(shape = 21, size = 5)),
+    color = "none" # Hide the redundant color legend
+  )
+
+print(pca_ubi_combined_plot)
+```
+
+

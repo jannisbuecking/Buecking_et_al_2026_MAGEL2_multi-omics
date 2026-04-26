@@ -1,0 +1,14 @@
+*.rds binary
+*.RData binary
+*.xlsx binary
+*.xls binary
+*.gct binary
+*.gz binary
+*.fasta text
+*.fa text
+*.csv text
+*.tsv text
+*.txt text
+*.Rmd text
+*.md text
+

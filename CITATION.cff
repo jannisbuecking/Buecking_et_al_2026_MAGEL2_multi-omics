@@ -10,7 +10,7 @@ authors:
   - family-names: Schaaf
     given-names: Christian P.
 repository-code: "https://github.com/jannisbuecking/Buecking_et_al_2026_MAGEL2_multi-omics"
+doi: "10.5281/zenodo.19799679"
 abstract: "Custom analysis code and associated processed analysis objects for multi-omics profiling of MAGEL2-driven defects in human corticogenesis across Prader-Willi and Schaaf-Yang syndromes."
 license: MIT
-date-released: "2026"
-
+date-released: "2026-04-26"

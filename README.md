@@ -1,5 +1,7 @@
 # Buecking et al. 2026 MAGEL2 Multi-omics
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19799679.svg)](https://doi.org/10.5281/zenodo.19799679)
+
 This repository contains the custom analysis code and associated analysis objects for:
 
 **Multi-omics profiling reveals convergent MAGEL2-driven defects in human corticogenesis across Prader-Willi and Schaaf-Yang syndromes.**
@@ -12,9 +14,11 @@ MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
 MAMOTH source-code repository: https://github.com/jannisbuecking/MAMOTH
 
+Archived release DOI: https://doi.org/10.5281/zenodo.19799679
+
 ## Repository status
 
-This repository is intended to remain private until publication. It will be made publicly available as of the date of publication.
+This repository is publicly available as the publication release for the associated manuscript.
 
 The files are intentionally kept in a flat layout because the R Markdown notebooks use local relative paths. This preserves the runnable state of the curated analysis folder.
 

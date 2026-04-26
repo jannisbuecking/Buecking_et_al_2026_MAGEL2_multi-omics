@@ -50,11 +50,16 @@ Some notebooks access external databases or services at runtime, including Ensem
 
 The notebooks were developed in R/R Markdown and use Bioconductor and CRAN packages including, among others, `DESeq2`, `SummarizedExperiment`, `limma`, `clusterProfiler`, `org.Hs.eg.db`, `AnnotationHub`, `biomaRt`, `STRINGdb`, `MOFA2`, `openxlsx`, `readxl`, `tidyverse`, `ComplexUpset`, `pheatmap`, and `ggplot2`.
 
-For exact reproducibility, run `sessionInfo()` after rendering each notebook and archive the output with the manuscript version.
+Environment records are included:
+
+- `renv.lock`: package lockfile generated from the local R analysis environment.
+- `session_info/sessionInfo.txt`: plain-text R session information.
+- `session_info/detected_package_versions.tsv`: package versions detected from notebook `library()` and `require()` calls.
+
+See `docs/reproducibility_checklist.md` for restore and update instructions.
 
 ## Licenses
 
 Code and scripts are licensed under the MIT License. See `LICENSE`.
 
 Data, processed analysis objects, and result tables are intended to be shared under the Creative Commons Attribution 4.0 International License (CC BY 4.0), pending final PI/lab confirmation. See `LICENSE-DATA.md`.
-

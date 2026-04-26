@@ -1,0 +1,48 @@
+{
+  "title": "Buecking et al. 2026 MAGEL2 multi-omics analysis code and processed data",
+  "upload_type": "software",
+  "publication_date": "2026-04-26",
+  "creators": [
+    {"name": "Buecking, Jannis"},
+    {"name": "Gueler, Baran Enes"},
+    {"name": "Eibl, Michael"},
+    {"name": "Syed Ali, Azmal"},
+    {"name": "Walczuch, Tobias"},
+    {"name": "Beschauner, Tobias"},
+    {"name": "Theiss, Susanne"},
+    {"name": "Spanjaard, Melanie"},
+    {"name": "Hinderhofer, Katrin"},
+    {"name": "Herrmann-Sim, Freya"},
+    {"name": "de Esch, Celine E."},
+    {"name": "Tai, Derek J. C."},
+    {"name": "Talkowski, Michael E."},
+    {"name": "Krijgsveld, Jeroen"},
+    {"name": "Schaaf, Christian P."},
+    {"name": "Laugsch, Magdalena"}
+  ],
+  "description": "Custom analysis code and associated processed analysis objects for multi-omics profiling of MAGEL2-driven defects in human corticogenesis across Prader-Willi and Schaaf-Yang syndromes.",
+  "license": "cc-by-4.0",
+  "keywords": [
+    "MAGEL2",
+    "multi-omics",
+    "RNA-seq",
+    "proteomics",
+    "ubiquitinomics",
+    "Prader-Willi syndrome",
+    "Schaaf-Yang syndrome",
+    "human corticogenesis"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/jannisbuecking/MAMOTH",
+      "relation": "isSupplementedBy",
+      "resource_type": "software"
+    },
+    {
+      "identifier": "https://jannisbuecking-mamoth.share.connect.posit.cloud/",
+      "relation": "isSupplementedBy",
+      "resource_type": "publication-other"
+    }
+  ],
+  "notes": "Code and scripts are licensed under the MIT License. Data, processed analysis objects, and result tables are shared under the Creative Commons Attribution 4.0 International License."
+}

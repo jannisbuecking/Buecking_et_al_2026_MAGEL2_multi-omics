@@ -12,7 +12,7 @@ Lead contact: Magdalena Laugsch (magdalena.laugsch@uni-heidelberg.de)
 
 MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
-MAMOTH source-code repository: https://github.com/jannisbuecking/MAMOTH
+MAMMOTH source-code repository: https://github.com/jannisbuecking/MAMMOTH
 
 Archived release DOI: https://doi.org/10.5281/zenodo.19799679
 
@@ -28,7 +28,7 @@ RNA-seq and mass-spectrometry data have been deposited at GEO and will be public
 
 All custom code used for the multi-omics analysis is included in this repository. Any additional information required to re-analyze the data reported in the paper is available from the lead contact upon request.
 
-The associated MAMOTH Shiny web-app source code and packaged app data are maintained separately at https://github.com/jannisbuecking/MAMOTH.
+The associated MAMMOTH Shiny web-app source code and packaged app data are maintained separately at https://github.com/jannisbuecking/MAMMOTH.
 
 ## Analysis notebooks
 

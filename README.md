@@ -1,6 +1,6 @@
 # Buecking et al. 2026 MAGEL2 Multi-omics
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19799679.svg)](https://doi.org/10.5281/zenodo.19799679)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19799678.svg)](https://doi.org/10.5281/zenodo.19799678)
 
 This repository contains the custom analysis code and associated analysis objects for:
 
@@ -14,7 +14,7 @@ MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
 MAMMOTH source-code repository: https://github.com/jannisbuecking/MAMMOTH
 
-Archived release DOI: https://doi.org/10.5281/zenodo.19799679
+Zenodo concept DOI: https://doi.org/10.5281/zenodo.19799678
 
 ## Repository status
 

@@ -34,7 +34,7 @@
   ],
   "related_identifiers": [
     {
-      "identifier": "https://github.com/jannisbuecking/MAMOTH",
+      "identifier": "https://github.com/jannisbuecking/MAMMOTH",
       "relation": "isSupplementedBy",
       "resource_type": "software"
     },

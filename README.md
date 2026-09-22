@@ -10,17 +10,12 @@ Authors: Jannis Buecking, Baran Enes Gueler, Michael Eibl, Azmal Syed Ali, Tobia
 
 Lead contact: Magdalena Laugsch (magdalena.laugsch@uni-heidelberg.de)
 
+Link to the bioRxiv preprint: https://www.biorxiv.org/content/10.64898/2026.05.01.722223v1 
+
 MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
 MAMMOTH source-code repository: https://github.com/jannisbuecking/MAMMOTH
 
-Zenodo concept DOI: https://doi.org/10.5281/zenodo.19799678
-
-## Repository status
-
-This repository is publicly available as the publication release for the associated manuscript.
-
-The files are intentionally kept in a flat layout because the R Markdown notebooks use local relative paths. This preserves the runnable state of the curated analysis folder.
 
 ## Data and code availability
 

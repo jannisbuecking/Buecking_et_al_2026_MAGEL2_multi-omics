@@ -16,6 +16,7 @@ MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
 MAMMOTH source-code repository: https://github.com/jannisbuecking/MAMMOTH
 
+<img width="806" height="803" alt="image" src="https://github.com/user-attachments/assets/5e16676d-87c9-488a-bd4f-51ffdd8bca65" />
 
 ## Data and code availability
 

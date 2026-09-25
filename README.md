@@ -4,7 +4,7 @@
 
 This repository contains the custom analysis code and associated analysis objects for:
 
-**Multi-omics profiling reveals convergent MAGEL2-driven defects in human corticogenesis across Prader-Willi and Schaaf-Yang syndromes.**
+**MAGEL2-dependent accelerated human corticogenesis shared across Prader-Willi and Schaaf-Yang syndromes.**
 
 Authors: Jannis Buecking, Baran Enes Gueler, Michael Eibl, Azmal Syed Ali, Tobias Walczuch, Tobias Beschauner, Susanne Theiss, Melanie Spanjaard, Katrin Hinderhofer, Freya Herrmann-Sim, Celine E. de Esch, Derek J.C. Tai, Michael E. Talkowski, Jeroen Krijgsveld, Christian P. Schaaf, and Magdalena Laugsch.
 
@@ -12,7 +12,7 @@ Lead contact: Magdalena Laugsch (magdalena.laugsch@uni-heidelberg.de)
 
 Link to the bioRxiv preprint: https://www.biorxiv.org/content/10.64898/2026.05.01.722223v1 
 
-MAMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
+MAMMOTH Web Portal: https://jannisbuecking-mamoth.share.connect.posit.cloud/
 
 MAMMOTH source-code repository: https://github.com/jannisbuecking/MAMMOTH
 
